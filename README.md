@@ -76,6 +76,125 @@ curl -X DELETE http://localhost:8080/v1/media/my-video
 curl http://localhost:8080/v1/health
 ```
 
+### Interactive TUI
+
+KaidaDB includes a terminal UI for browsing and managing your media library.
+
+```bash
+# Launch against default server
+cargo run -p kaidadb-tui
+
+# Custom server address
+cargo run -p kaidadb-tui -- --addr http://localhost:50051
+```
+
+**Keybindings:**
+
+| Key | Action |
+|-----|--------|
+| `j`/`k` or Up/Down | Navigate media list |
+| `g`/`G` | Jump to first/last item |
+| `Enter` | Full-screen detail view |
+| `s` | Store media (prompts for key + file path) |
+| `d` | Delete selected media (with confirmation) |
+| `/` | Search/filter by key or content type |
+| `n` | Next search match |
+| `r` | Refresh list from server |
+| `Tab` | Toggle active panel |
+| `Esc` | Back/cancel |
+| `q` | Quit |
+
+## Organizing Media with Key Paths
+
+KaidaDB keys are plain strings, but using `/`-delimited paths gives you a hierarchical namespace that keeps your media organized. Combined with **prefix queries**, this acts like a virtual directory tree — without any actual directory overhead.
+
+### Key Naming Convention
+
+Structure your keys as `type/title/season/episode`:
+
+```
+tv/breaking-bad/s01/e01-pilot
+tv/breaking-bad/s01/e02-cats-in-the-bag
+tv/breaking-bad/s02/e01-seven-thirty-seven
+
+tv/the-wire/s01/e01-the-target
+tv/the-wire/s01/e02-the-detail
+
+movies/inception
+movies/the-matrix
+movies/the-matrix-reloaded
+
+music/pink-floyd/dark-side-of-the-moon/01-speak-to-me
+music/pink-floyd/dark-side-of-the-moon/02-breathe
+
+podcasts/hardcore-history/ep01-alexander-vs-hitler
+```
+
+This solves the "every show has a pilot" problem — `tv/breaking-bad/s01/e01-pilot` and `tv/the-wire/s01/e01-the-target` are distinct keys even though both are pilot episodes, because the show name and season are part of the path.
+
+### Browsing with Prefix Queries
+
+The prefix-based list API lets you browse any level of the hierarchy:
+
+```bash
+# List all TV shows (just the top level)
+kaidadb-cli list -p tv/
+
+# List all seasons of Breaking Bad
+kaidadb-cli list -p tv/breaking-bad/
+
+# List all episodes in season 1
+kaidadb-cli list -p tv/breaking-bad/s01/
+
+# List all movies
+kaidadb-cli list -p movies/
+
+# List all Pink Floyd albums
+kaidadb-cli list -p music/pink-floyd/
+```
+
+REST equivalent:
+
+```bash
+# Browse a show's seasons
+curl "http://localhost:8080/v1/media?prefix=tv/breaking-bad/"
+
+# Paginate through a large library
+curl "http://localhost:8080/v1/media?prefix=tv/&limit=20"
+curl "http://localhost:8080/v1/media?prefix=tv/&limit=20&cursor=tv/the-wire/s01/e02-the-detail"
+```
+
+In the TUI, press `/` and type a prefix like `tv/breaking-bad` to filter the list down to just that show.
+
+### Recommended Key Patterns
+
+| Media Type | Pattern | Example |
+|-----------|---------|---------|
+| TV shows | `tv/{show}/s{NN}/e{NN}-{slug}` | `tv/severance/s01/e01-good-news-about-hell` |
+| Movies | `movies/{slug}` | `movies/blade-runner-2049` |
+| Movie series | `movies/{series}/{slug}` | `movies/lord-of-the-rings/fellowship` |
+| Music | `music/{artist}/{album}/{NN}-{track}` | `music/radiohead/ok-computer/01-airbag` |
+| Podcasts | `podcasts/{show}/{slug}` | `podcasts/serial/s01e01` |
+| Audio books | `audiobooks/{author}/{title}/{NN}` | `audiobooks/frank-herbert/dune/01` |
+| Photos | `photos/{date}/{slug}` | `photos/2026-03/sunset-beach` |
+| Surveillance | `cameras/{cam-id}/{date}/{time}` | `cameras/front-door/2026-03-16/14-30` |
+
+### Tips
+
+- **Use lowercase slugs** with hyphens — keys are case-sensitive, and consistency prevents duplicates like `TV/` vs `tv/`.
+- **Put the most selective segment first** — `tv/show/season/episode` lets you query all episodes of a show efficiently. If you instead used `s01/tv/show/episode`, querying "all of Breaking Bad" would require scanning every season prefix.
+- **Add metadata via headers** — instead of encoding everything in the key, attach structured data like resolution, language, or codec as custom metadata:
+  ```bash
+  curl -X PUT \
+    -H "Content-Type: video/mp4" \
+    -H "X-KaidaDB-Meta-resolution: 4k" \
+    -H "X-KaidaDB-Meta-language: en" \
+    -H "X-KaidaDB-Meta-codec: h265" \
+    -T episode.mp4 \
+    http://localhost:8080/v1/media/tv/severance/s01/e01-good-news-about-hell
+  ```
+- **Dedup works across keys** — if two episodes share identical intro sequences, the overlapping chunks are stored only once on disk regardless of key paths.
+
 ## Architecture
 
 ```
@@ -90,7 +209,8 @@ KaidaDB/
 │   ├── kaidadb-cluster/         # Distributed consensus (Phase 3)
 │   ├── kaidadb-api/             # gRPC + REST gateway
 │   ├── kaidadb-server/          # Server binary
-│   └── kaidadb-cli/             # CLI client binary
+│   ├── kaidadb-cli/             # CLI client binary
+│   └── kaidadb-tui/             # Interactive terminal UI
 ```
 
 **Dependency flow:** `server/cli` → `api` → `storage + cache` → `common`
@@ -302,6 +422,10 @@ Server binary. Starts both gRPC and REST servers concurrently. Graceful shutdown
 ### kaidadb-cli
 
 CLI client binary. Communicates with the server over gRPC.
+
+### kaidadb-tui
+
+Interactive terminal UI built with ratatui. Split-pane layout with media browser, detail panel, search/filter, store, and delete dialogs. Communicates with the server over gRPC.
 
 ## Testing
 
