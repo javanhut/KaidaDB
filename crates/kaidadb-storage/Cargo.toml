@@ -1,0 +1,25 @@
+[package]
+name = "kaidadb-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kaidadb-common = { workspace = true }
+memmap2 = { workspace = true }
+sha2 = { workspace = true }
+crc32fast = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+kaidadb-cache = { workspace = true }
+tokio = { workspace = true }

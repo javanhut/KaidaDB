@@ -1,0 +1,27 @@
+[package]
+name = "kaidadb-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kaidadb-common = { workspace = true }
+kaidadb-storage = { workspace = true }
+kaidadb-cache = { workspace = true }
+
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio-stream = { workspace = true }
+http = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }

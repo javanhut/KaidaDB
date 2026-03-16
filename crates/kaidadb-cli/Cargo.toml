@@ -1,0 +1,23 @@
+[package]
+name = "kaidadb-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kaidadb-cli"
+path = "src/main.rs"
+
+[dependencies]
+kaidadb-common = { workspace = true }
+
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+tokio-stream = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }

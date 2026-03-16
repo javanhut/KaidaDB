@@ -1,0 +1,11 @@
+[package]
+name = "kaidadb-cache"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kaidadb-common = { workspace = true }
+lru = { workspace = true }
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }

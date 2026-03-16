@@ -1,0 +1,11 @@
+data_dir = "./data"
+grpc_addr = "0.0.0.0:50051"
+rest_addr = "0.0.0.0:8080"
+
+[storage]
+chunk_size = 2097152  # 2 MiB
+
+[cache]
+max_size = 536870912  # 512 MiB
+prefetch_window = 3
+warm_on_write = false

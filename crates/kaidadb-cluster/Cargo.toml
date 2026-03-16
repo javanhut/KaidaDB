@@ -1,0 +1,10 @@
+[package]
+name = "kaidadb-cluster"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kaidadb-common = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }

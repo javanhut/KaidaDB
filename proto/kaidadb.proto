@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package kaidadb;
+
+service KaidaDB {
+    // Store media via client-streaming upload
+    rpc StoreMedia(stream StoreMediaRequest) returns (StoreMediaResponse);
+
+    // Stream media back via server-streaming download
+    rpc StreamMedia(StreamMediaRequest) returns (stream MediaChunk);
+
+    // Get media metadata
+    rpc GetMediaMeta(GetMediaMetaRequest) returns (MediaMetadata);
+
+    // Delete media
+    rpc DeleteMedia(DeleteMediaRequest) returns (DeleteMediaResponse);
+
+    // List media keys
+    rpc ListMedia(ListMediaRequest) returns (ListMediaResponse);
+
+    // Health check
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message StoreMediaRequest {
+    oneof request {
+        StoreMediaHeader header = 1;
+        bytes chunk_data = 2;
+    }
+}
+
+message StoreMediaHeader {
+    string key = 1;
+    string content_type = 2;
+    map<string, string> metadata = 3;
+}
+
+message StoreMediaResponse {
+    string key = 1;
+    uint64 total_size = 2;
+    uint32 chunk_count = 3;
+    string checksum = 4;
+}
+
+message StreamMediaRequest {
+    string key = 1;
+    uint64 offset = 2;   // byte offset to start from
+    uint64 length = 3;   // 0 = stream to end
+}
+
+message MediaChunk {
+    uint32 sequence = 1;
+    bytes data = 2;
+    uint64 offset = 3;
+    bool is_last = 4;
+}
+
+message GetMediaMetaRequest {
+    string key = 1;
+}
+
+message MediaMetadata {
+    string key = 1;
+    uint64 total_size = 2;
+    uint32 chunk_count = 3;
+    string content_type = 4;
+    string checksum = 5;
+    map<string, string> metadata = 6;
+    int64 created_at = 7;
+    int64 updated_at = 8;
+}
+
+message DeleteMediaRequest {
+    string key = 1;
+}
+
+message DeleteMediaResponse {
+    bool deleted = 1;
+}
+
+message ListMediaRequest {
+    string prefix = 1;
+    uint32 limit = 2;
+    string cursor = 3;
+}
+
+message ListMediaResponse {
+    repeated MediaMetadata items = 1;
+    string next_cursor = 2;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+    string status = 1;
+    string version = 2;
+    uint64 uptime_seconds = 3;
+}

@@ -1,0 +1,24 @@
+[package]
+name = "kaidadb-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kaidadb-server"
+path = "src/main.rs"
+
+[dependencies]
+kaidadb-common = { workspace = true }
+kaidadb-storage = { workspace = true }
+kaidadb-cache = { workspace = true }
+kaidadb-api = { workspace = true }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+figment = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+tonic = { workspace = true }
