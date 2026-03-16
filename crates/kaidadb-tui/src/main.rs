@@ -103,31 +103,64 @@ async fn run(
                         _ => {}
                     },
                     InputMode::StoreKey => match key.code {
-                        KeyCode::Enter => app.input_mode = InputMode::StorePath,
+                        KeyCode::Enter | KeyCode::Tab => app.advance_to_browser(),
                         KeyCode::Esc => {
                             app.store_key_input.clear();
-                            app.store_path_input.clear();
                             app.input_mode = InputMode::Normal;
                         }
-                        KeyCode::Char(c) => app.store_key_input.push(c),
-                        KeyCode::Backspace => {
-                            app.store_key_input.pop();
-                        }
+                        KeyCode::Left => app.store_key_move_left(),
+                        KeyCode::Right => app.store_key_move_right(),
+                        KeyCode::Home => app.store_key_home(),
+                        KeyCode::End => app.store_key_end(),
+                        KeyCode::Backspace => app.store_key_backspace(),
+                        KeyCode::Delete => app.store_key_delete(),
+                        KeyCode::Char(c) => app.store_key_insert_char(c),
                         _ => {}
                     },
-                    InputMode::StorePath => match key.code {
-                        KeyCode::Enter => {
-                            app.execute_store().await;
-                            app.input_mode = InputMode::Normal;
-                        }
+                    InputMode::FileBrowser => match key.code {
                         KeyCode::Esc => {
                             app.store_key_input.clear();
-                            app.store_path_input.clear();
                             app.input_mode = InputMode::Normal;
                         }
-                        KeyCode::Char(c) => app.store_path_input.push(c),
-                        KeyCode::Backspace => {
-                            app.store_path_input.pop();
+                        KeyCode::Tab => {
+                            // Tab back to key input
+                            app.input_mode = InputMode::StoreKey;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => app.browser_previous(),
+                        KeyCode::Down | KeyCode::Char('j') => app.browser_next(),
+                        KeyCode::Home | KeyCode::Char('g') => app.browser_first(),
+                        KeyCode::End | KeyCode::Char('G') => app.browser_last(),
+                        KeyCode::PageDown => app.browser_page_down(20),
+                        KeyCode::PageUp => app.browser_page_up(20),
+                        KeyCode::Left | KeyCode::Backspace => app.browser_go_up(),
+                        KeyCode::Right => {
+                            // Right arrow enters dirs, same as Enter for dirs
+                            if let Some(entry) = app.browser_selected_entry() {
+                                if entry.is_dir {
+                                    app.browser_enter();
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if app.browser_selected_is_file() {
+                                let entry = app.browser_entries[app.browser_selected].clone();
+                                app.suggest_key_from_path(&entry.path);
+                                if app.store_key_input.is_empty() {
+                                    // Need a key first
+                                    app.status_message =
+                                        "Enter a key first (Tab to go back)".into();
+                                    app.input_mode = InputMode::StoreKey;
+                                } else {
+                                    app.execute_store_file(&entry.path).await;
+                                    app.input_mode = InputMode::Normal;
+                                }
+                            } else {
+                                app.browser_enter();
+                            }
+                        }
+                        KeyCode::Char('.') => {
+                            // Toggle showing hidden files — just reload for now
+                            app.load_browser_dir();
                         }
                         _ => {}
                     },

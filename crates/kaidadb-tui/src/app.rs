@@ -1,4 +1,5 @@
 use crate::client::{self, KaidaDbClient, MediaMetadata};
+use std::path::{Path, PathBuf};
 use tonic::transport::Channel;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -6,7 +7,7 @@ pub enum InputMode {
     Normal,
     Search,
     StoreKey,
-    StorePath,
+    FileBrowser,
     DeleteConfirm,
     Detail,
 }
@@ -17,6 +18,14 @@ pub enum Panel {
     Detail,
 }
 
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: PathBuf,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
 pub struct App {
     pub addr: String,
     pub client: Option<KaidaDbClient<Channel>>,
@@ -24,7 +33,7 @@ pub struct App {
 
     // Media list
     pub items: Vec<MediaMetadata>,
-    pub filtered_items: Vec<usize>, // indices into items
+    pub filtered_items: Vec<usize>,
     pub selected: usize,
 
     // UI state
@@ -38,7 +47,13 @@ pub struct App {
 
     // Store dialog
     pub store_key_input: String,
-    pub store_path_input: String,
+    pub store_key_cursor: usize,
+
+    // File browser
+    pub browser_dir: PathBuf,
+    pub browser_entries: Vec<FileEntry>,
+    pub browser_selected: usize,
+    pub browser_scroll_offset: usize,
 
     // Detail view
     pub detail_item: Option<MediaMetadata>,
@@ -50,6 +65,10 @@ pub struct App {
 
 impl App {
     pub fn new(addr: String) -> Self {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/"));
+
         Self {
             addr,
             client: None,
@@ -63,7 +82,11 @@ impl App {
             search_input: String::new(),
             search_query: String::new(),
             store_key_input: String::new(),
-            store_path_input: String::new(),
+            store_key_cursor: 0,
+            browser_dir: home,
+            browser_entries: Vec::new(),
+            browser_selected: 0,
+            browser_scroll_offset: 0,
             detail_item: None,
             health_status: "unknown".into(),
             server_version: String::new(),
@@ -179,9 +202,8 @@ impl App {
     }
 
     pub fn back(&mut self) {
-        match self.input_mode {
-            InputMode::Detail => self.input_mode = InputMode::Normal,
-            _ => {}
+        if let InputMode::Detail = self.input_mode {
+            self.input_mode = InputMode::Normal;
         }
     }
 
@@ -208,22 +230,187 @@ impl App {
         }
     }
 
+    // --- Store / File Browser ---
+
     pub fn enter_store_mode(&mut self) {
         self.store_key_input.clear();
-        self.store_path_input.clear();
+        self.store_key_cursor = 0;
         self.input_mode = InputMode::StoreKey;
+        self.load_browser_dir();
     }
 
-    pub async fn execute_store(&mut self) {
-        let key = self.store_key_input.clone();
-        let path = self.store_path_input.clone();
+    pub fn store_key_insert_char(&mut self, c: char) {
+        self.store_key_input.insert(self.store_key_cursor, c);
+        self.store_key_cursor += c.len_utf8();
+    }
 
-        if key.is_empty() || path.is_empty() {
-            self.status_message = "Key and path are required".into();
+    pub fn store_key_backspace(&mut self) {
+        if self.store_key_cursor > 0 {
+            let prev = self.store_key_input[..self.store_key_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.store_key_input.drain(prev..self.store_key_cursor);
+            self.store_key_cursor = prev;
+        }
+    }
+
+    pub fn store_key_delete(&mut self) {
+        if self.store_key_cursor < self.store_key_input.len() {
+            let next = self.store_key_input[self.store_key_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.store_key_cursor + i)
+                .unwrap_or(self.store_key_input.len());
+            self.store_key_input.drain(self.store_key_cursor..next);
+        }
+    }
+
+    pub fn store_key_move_left(&mut self) {
+        if self.store_key_cursor > 0 {
+            self.store_key_cursor = self.store_key_input[..self.store_key_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+    }
+
+    pub fn store_key_move_right(&mut self) {
+        if self.store_key_cursor < self.store_key_input.len() {
+            self.store_key_cursor = self.store_key_input[self.store_key_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.store_key_cursor + i)
+                .unwrap_or(self.store_key_input.len());
+        }
+    }
+
+    pub fn store_key_home(&mut self) {
+        self.store_key_cursor = 0;
+    }
+
+    pub fn store_key_end(&mut self) {
+        self.store_key_cursor = self.store_key_input.len();
+    }
+
+    pub fn advance_to_browser(&mut self) {
+        self.input_mode = InputMode::FileBrowser;
+    }
+
+    pub fn load_browser_dir(&mut self) {
+        let dir = &self.browser_dir;
+        let mut entries = Vec::new();
+
+        if let Ok(read_dir) = std::fs::read_dir(dir) {
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                let meta = entry.metadata().ok();
+                let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+
+                entries.push(FileEntry {
+                    name,
+                    path,
+                    is_dir,
+                    size,
+                });
+            }
+        }
+
+        // Sort: directories first, then by name
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+
+        self.browser_entries = entries;
+        self.browser_selected = 0;
+        self.browser_scroll_offset = 0;
+    }
+
+    pub fn browser_next(&mut self) {
+        if !self.browser_entries.is_empty() {
+            self.browser_selected =
+                (self.browser_selected + 1).min(self.browser_entries.len() - 1);
+        }
+    }
+
+    pub fn browser_previous(&mut self) {
+        self.browser_selected = self.browser_selected.saturating_sub(1);
+    }
+
+    pub fn browser_page_down(&mut self, visible_rows: usize) {
+        if !self.browser_entries.is_empty() {
+            self.browser_selected = (self.browser_selected + visible_rows)
+                .min(self.browser_entries.len() - 1);
+        }
+    }
+
+    pub fn browser_page_up(&mut self, visible_rows: usize) {
+        self.browser_selected = self.browser_selected.saturating_sub(visible_rows);
+    }
+
+    pub fn browser_first(&mut self) {
+        self.browser_selected = 0;
+    }
+
+    pub fn browser_last(&mut self) {
+        if !self.browser_entries.is_empty() {
+            self.browser_selected = self.browser_entries.len() - 1;
+        }
+    }
+
+    pub fn browser_enter(&mut self) {
+        if let Some(entry) = self.browser_entries.get(self.browser_selected) {
+            if entry.is_dir {
+                self.browser_dir = entry.path.clone();
+                self.load_browser_dir();
+            }
+            // File selection is handled by the caller (main.rs) via browser_select_file
+        }
+    }
+
+    pub fn browser_go_up(&mut self) {
+        if let Some(parent) = self.browser_dir.parent() {
+            self.browser_dir = parent.to_path_buf();
+            self.load_browser_dir();
+        }
+    }
+
+    pub fn browser_selected_entry(&self) -> Option<&FileEntry> {
+        self.browser_entries.get(self.browser_selected)
+    }
+
+    pub fn browser_selected_is_file(&self) -> bool {
+        self.browser_selected_entry()
+            .map(|e| !e.is_dir)
+            .unwrap_or(false)
+    }
+
+    /// Auto-suggest a key from the selected file path
+    pub fn suggest_key_from_path(&mut self, path: &Path) {
+        if !self.store_key_input.is_empty() {
+            return; // Don't overwrite user input
+        }
+        if let Some(stem) = path.file_stem() {
+            self.store_key_input = stem.to_string_lossy().to_string();
+            self.store_key_cursor = self.store_key_input.len();
+        }
+    }
+
+    pub async fn execute_store_file(&mut self, file_path: &Path) {
+        let key = self.store_key_input.clone();
+
+        if key.is_empty() {
+            self.status_message = "Key is required".into();
             return;
         }
 
-        let data = match tokio::fs::read(&path).await {
+        let data = match tokio::fs::read(file_path).await {
             Ok(d) => d,
             Err(e) => {
                 self.status_message = format!("Failed to read file: {e}");
@@ -231,7 +418,7 @@ impl App {
             }
         };
 
-        let ct = client::guess_content_type(&path).to_string();
+        let ct = client::guess_content_type(&file_path.to_string_lossy()).to_string();
 
         if let Some(ref mut client) = self.client {
             let header = client::StoreMediaRequest {
@@ -254,10 +441,7 @@ impl App {
                 });
             }
 
-            match client
-                .store_media(tokio_stream::iter(messages))
-                .await
-            {
+            match client.store_media(tokio_stream::iter(messages)).await {
                 Ok(resp) => {
                     let r = resp.into_inner();
                     self.status_message = format!(
@@ -273,7 +457,7 @@ impl App {
         }
 
         self.store_key_input.clear();
-        self.store_path_input.clear();
+        self.store_key_cursor = 0;
     }
 
     pub fn enter_delete_confirm(&mut self) {

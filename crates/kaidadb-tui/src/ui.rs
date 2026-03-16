@@ -11,10 +11,7 @@ use crate::app::{App, InputMode, Panel};
 pub fn draw(f: &mut Frame, app: &App) {
     match app.input_mode {
         InputMode::Detail => draw_detail_view(f, app),
-        InputMode::StoreKey | InputMode::StorePath => {
-            draw_main_layout(f, app);
-            draw_store_dialog(f, app);
-        }
+        InputMode::StoreKey | InputMode::FileBrowser => draw_store_view(f, app),
         InputMode::DeleteConfirm => {
             draw_main_layout(f, app);
             draw_delete_confirm(f, app);
@@ -27,13 +24,15 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
+// ── Main Layout ──────────────────────────────────────────────────────
+
 fn draw_main_layout(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // header
-            Constraint::Min(5),   // body
-            Constraint::Length(3), // status bar
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(3),
         ])
         .split(f.area());
 
@@ -44,9 +43,15 @@ fn draw_main_layout(f: &mut Frame, app: &App) {
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let connected_indicator = if app.connected {
-        Span::styled(" CONNECTED ", Style::default().fg(Color::Black).bg(Color::Green))
+        Span::styled(
+            " CONNECTED ",
+            Style::default().fg(Color::Black).bg(Color::Green),
+        )
     } else {
-        Span::styled(" DISCONNECTED ", Style::default().fg(Color::White).bg(Color::Red))
+        Span::styled(
+            " DISCONNECTED ",
+            Style::default().fg(Color::White).bg(Color::Red),
+        )
     };
 
     let title = Line::from(vec![
@@ -82,8 +87,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
-    let header = Paragraph::new(title).block(block);
-    f.render_widget(header, area);
+    f.render_widget(Paragraph::new(title).block(block), area);
 }
 
 fn draw_body(f: &mut Frame, app: &App, area: Rect) {
@@ -97,7 +101,7 @@ fn draw_body(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_media_list(f: &mut Frame, app: &App, area: Rect) {
-    let highlight_style = Style::default()
+    let hl = Style::default()
         .fg(Color::Black)
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -109,29 +113,24 @@ fn draw_media_list(f: &mut Frame, app: &App, area: Rect) {
         .map(|(i, &idx)| {
             let item = &app.items[idx];
             let size_str = format_size(item.total_size);
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("{:40}", truncate(&item.key, 40)),
-                    if i == app.selected {
-                        highlight_style
-                    } else {
-                        Style::default().fg(Color::White)
-                    },
-                ),
-                Span::styled(
-                    format!(" {:>8}", size_str),
-                    if i == app.selected {
-                        highlight_style
-                    } else {
-                        Style::default().fg(Color::Yellow)
-                    },
-                ),
-            ]);
-            ListItem::new(line)
+            let style = if i == app.selected {
+                hl
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let size_style = if i == app.selected {
+                hl
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:40}", truncate(&item.key, 40)), style),
+                Span::styled(format!(" {:>8}", size_str), size_style),
+            ]))
         })
         .collect();
 
-    let border_color = if app.active_panel == Panel::List {
+    let border = if app.active_panel == Panel::List {
         Color::Cyan
     } else {
         Color::DarkGray
@@ -141,65 +140,37 @@ fn draw_media_list(f: &mut Frame, app: &App, area: Rect) {
         Block::default()
             .title(" Media ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color)),
+            .border_style(Style::default().fg(border)),
     );
-
     f.render_widget(list, area);
 }
 
 fn draw_preview_panel(f: &mut Frame, app: &App, area: Rect) {
-    let border_color = if app.active_panel == Panel::Detail {
+    let border = if app.active_panel == Panel::Detail {
         Color::Cyan
     } else {
         Color::DarkGray
     };
-
     let block = Block::default()
         .title(" Details ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
+        .border_style(Style::default().fg(border));
 
     if let Some(item) = app.selected_item() {
+        let size_str = format!(
+            "{} ({})",
+            format_size(item.total_size),
+            format_bytes(item.total_size)
+        );
+        let chunks_str = item.chunk_count.to_string();
+        let created_str = format_timestamp(item.created_at);
         let rows = vec![
-            Row::new(vec![
-                Span::styled("Key", Style::default().fg(Color::DarkGray)),
-                Span::styled(item.key.clone(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            ]),
-            Row::new(vec![
-                Span::styled("Size", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{} ({})", format_size(item.total_size), format_bytes(item.total_size)),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]),
-            Row::new(vec![
-                Span::styled("Type", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    item.content_type.clone(),
-                    Style::default().fg(Color::Green),
-                ),
-            ]),
-            Row::new(vec![
-                Span::styled("Chunks", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    item.chunk_count.to_string(),
-                    Style::default().fg(Color::Cyan),
-                ),
-            ]),
-            Row::new(vec![
-                Span::styled("Checksum", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    truncate(&item.checksum, 32).to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]),
-            Row::new(vec![
-                Span::styled("Created", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format_timestamp(item.created_at),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
+            detail_row("Key", &item.key, Color::White, true),
+            detail_row("Size", &size_str, Color::Yellow, false),
+            detail_row("Type", &item.content_type, Color::Green, false),
+            detail_row("Chunks", &chunks_str, Color::Cyan, false),
+            detail_row("Checksum", truncate(&item.checksum, 32), Color::DarkGray, false),
+            detail_row("Created", &created_str, Color::White, false),
         ];
 
         let metadata_rows: Vec<Row> = item
@@ -214,13 +185,7 @@ fn draw_preview_panel(f: &mut Frame, app: &App, area: Rect) {
             .collect();
 
         let all_rows: Vec<Row> = rows.into_iter().chain(metadata_rows).collect();
-
-        let table = Table::new(
-            all_rows,
-            [Constraint::Length(12), Constraint::Min(20)],
-        )
-        .block(block);
-
+        let table = Table::new(all_rows, [Constraint::Length(12), Constraint::Min(20)]).block(block);
         f.render_widget(table, area);
     } else {
         let empty = Paragraph::new(Span::styled(
@@ -230,6 +195,17 @@ fn draw_preview_panel(f: &mut Frame, app: &App, area: Rect) {
         .block(block);
         f.render_widget(empty, area);
     }
+}
+
+fn detail_row<'a>(label: &'a str, value: &'a str, color: Color, bold: bool) -> Row<'a> {
+    let mut style = Style::default().fg(color);
+    if bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    Row::new(vec![
+        Span::styled(label, Style::default().fg(Color::DarkGray)),
+        Span::styled(value, style),
+    ])
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -247,11 +223,8 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     let status = Paragraph::new(Line::from(vec![
-        Span::styled(" ", Style::default()),
-        Span::styled(
-            &app.status_message,
-            Style::default().fg(Color::White),
-        ),
+        Span::raw(" "),
+        Span::styled(&app.status_message, Style::default().fg(Color::White)),
     ]))
     .block(
         Block::default()
@@ -259,11 +232,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(Color::DarkGray)),
     );
 
-    let keys = Paragraph::new(Span::styled(
-        keybinds,
-        Style::default().fg(Color::DarkGray),
-    ))
-    .block(
+    let keys = Paragraph::new(Span::styled(keybinds, Style::default().fg(Color::DarkGray))).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
@@ -273,9 +242,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(keys, chunks[1]);
 }
 
-fn draw_detail_view(f: &mut Frame, app: &App) {
-    let area = f.area();
+// ── Detail View ──────────────────────────────────────────────────────
 
+fn draw_detail_view(f: &mut Frame, app: &App) {
     let item = match &app.detail_item {
         Some(i) => i,
         None => return,
@@ -284,13 +253,12 @@ fn draw_detail_view(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // title
-            Constraint::Min(10),   // content
-            Constraint::Length(3), // status
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(3),
         ])
-        .split(area);
+        .split(f.area());
 
-    // Title
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
             " Media Detail ",
@@ -299,7 +267,12 @@ fn draw_detail_view(f: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(&item.key, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            &item.key,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]))
     .block(
         Block::default()
@@ -308,49 +281,24 @@ fn draw_detail_view(f: &mut Frame, app: &App) {
     );
     f.render_widget(title, chunks[0]);
 
-    // Content
+    let size_str = format!(
+        "{} ({})",
+        format_size(item.total_size),
+        format_bytes(item.total_size)
+    );
+    let chunks_str = item.chunk_count.to_string();
+    let created_str = format_timestamp(item.created_at);
+    let updated_str = format_timestamp(item.updated_at);
+
     let mut lines = vec![
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Key:          ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&item.key, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Size:         ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{} ({})", format_size(item.total_size), format_bytes(item.total_size)),
-                Style::default().fg(Color::Yellow),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Content-Type: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&item.content_type, Style::default().fg(Color::Green)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Chunks:       ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                item.chunk_count.to_string(),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Checksum:     ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&item.checksum, Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Created:      ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format_timestamp(item.created_at),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Updated:      ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format_timestamp(item.updated_at),
-                Style::default().fg(Color::White),
-            ),
-        ]),
+        labeled_line("  Key:          ", &item.key, Color::White, true),
+        labeled_line("  Size:         ", &size_str, Color::Yellow, false),
+        labeled_line("  Content-Type: ", &item.content_type, Color::Green, false),
+        labeled_line("  Chunks:       ", &chunks_str, Color::Cyan, false),
+        labeled_line("  Checksum:     ", &item.checksum, Color::White, false),
+        labeled_line("  Created:      ", &created_str, Color::White, false),
+        labeled_line("  Updated:      ", &updated_str, Color::White, false),
     ];
 
     if !item.metadata.is_empty() {
@@ -364,7 +312,7 @@ fn draw_detail_view(f: &mut Frame, app: &App) {
         for (k, v) in &item.metadata {
             lines.push(Line::from(vec![
                 Span::styled(format!("    {k}: "), Style::default().fg(Color::Magenta)),
-                Span::styled(v, Style::default().fg(Color::White)),
+                Span::styled(v.as_str(), Style::default().fg(Color::White)),
             ]));
         }
     }
@@ -378,7 +326,6 @@ fn draw_detail_view(f: &mut Frame, app: &App) {
         .wrap(Wrap { trim: false });
     f.render_widget(content, chunks[1]);
 
-    // Status
     let status = Paragraph::new(Span::styled(
         " Esc Back │ d Delete ",
         Style::default().fg(Color::DarkGray),
@@ -391,79 +338,229 @@ fn draw_detail_view(f: &mut Frame, app: &App) {
     f.render_widget(status, chunks[2]);
 }
 
-fn draw_store_dialog(f: &mut Frame, app: &App) {
-    let area = centered_rect(60, 9, f.area());
-    f.render_widget(Clear, area);
+// ── Store View (full screen with file browser) ───────────────────────
 
-    let block = Block::default()
-        .title(" Store Media ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+fn draw_store_view(f: &mut Frame, app: &App) {
+    let area = f.area();
 
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // title
+            Constraint::Length(5), // key input
+            Constraint::Min(8),   // file browser
+            Constraint::Length(3), // status/keybinds
+        ])
+        .split(area);
+
+    // Title bar
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled(
+            " Store Media ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            "Select a file and enter a key to store it in KaidaDB",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    f.render_widget(title, chunks[0]);
+
+    // Key input area
+    draw_key_input(f, app, chunks[1]);
+
+    // File browser
+    draw_file_browser(f, app, chunks[2]);
+
+    // Keybinds
+    let help = match app.input_mode {
+        InputMode::StoreKey => {
+            " Tab/Enter: browse files │ Left/Right: move cursor │ Esc: cancel "
+        }
+        InputMode::FileBrowser => {
+            " Enter: select file/open dir │ Backspace/Left: parent dir │ Tab: edit key │ Esc: cancel "
+        }
+        _ => "",
+    };
+    let status = Paragraph::new(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(&app.status_message, Style::default().fg(Color::White)),
+        Span::raw("  "),
+        Span::styled(help, Style::default().fg(Color::DarkGray)),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(status, chunks[3]);
+}
+
+fn draw_key_input(f: &mut Frame, app: &App, area: Rect) {
+    let is_active = app.input_mode == InputMode::StoreKey;
+    let border_color = if is_active {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+    let label_style = if is_active {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    // Build the key text with a visible cursor
+    let key_text = &app.store_key_input;
+    let cursor_pos = app.store_key_cursor;
+
+    let (before, after) = key_text.split_at(cursor_pos.min(key_text.len()));
+    let (cursor_char, rest) = if after.is_empty() {
+        (" ", "")
+    } else {
+        after.split_at(after.char_indices().nth(1).map(|(i, _)| i).unwrap_or(after.len()))
+    };
+
+    let text_style = Style::default().fg(Color::White);
+    let cursor_style = if is_active {
+        Style::default().fg(Color::Black).bg(Color::Yellow)
+    } else {
+        text_style
+    };
 
     let lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled(
-                if app.input_mode == InputMode::StoreKey { "▸ " } else { "  " },
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled("Key:  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                &app.store_key_input,
-                Style::default().fg(if app.input_mode == InputMode::StoreKey {
-                    Color::White
-                } else {
-                    Color::DarkGray
-                }),
-            ),
-            if app.input_mode == InputMode::StoreKey {
-                Span::styled("█", Style::default().fg(Color::Yellow))
-            } else {
-                Span::raw("")
-            },
+            Span::styled("  Key: ", label_style),
+            Span::styled(before, text_style),
+            Span::styled(cursor_char, cursor_style),
+            Span::styled(rest, text_style),
         ]),
         Line::from(vec![
             Span::styled(
-                if app.input_mode == InputMode::StorePath { "▸ " } else { "  " },
-                Style::default().fg(Color::Yellow),
+                "        e.g. tv/breaking-bad/s01/e01-pilot",
+                Style::default().fg(Color::DarkGray),
             ),
-            Span::styled("Path: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                &app.store_path_input,
-                Style::default().fg(if app.input_mode == InputMode::StorePath {
-                    Color::White
-                } else {
-                    Color::DarkGray
-                }),
-            ),
-            if app.input_mode == InputMode::StorePath {
-                Span::styled("█", Style::default().fg(Color::Yellow))
-            } else {
-                Span::raw("")
-            },
         ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Enter: next/confirm │ Esc: cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
     ];
 
-    let dialog = Paragraph::new(lines);
-    f.render_widget(dialog, inner);
+    let block = Block::default()
+        .title(if is_active { " Key (editing) " } else { " Key " })
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn draw_delete_confirm(f: &mut Frame, app: &App) {
-    let area = centered_rect(50, 7, f.area());
-    f.render_widget(Clear, area);
+fn draw_file_browser(f: &mut Frame, app: &App, area: Rect) {
+    let is_active = app.input_mode == InputMode::FileBrowser;
+    let border_color = if is_active {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
 
+    let block = Block::default()
+        .title(format!(" {} ", app.browser_dir.display()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.height == 0 {
+        return;
+    }
+
+    let visible_rows = inner.height as usize;
+
+    // Compute scroll offset
+    let scroll_offset = if app.browser_selected < app.browser_scroll_offset {
+        app.browser_selected
+    } else if app.browser_selected >= app.browser_scroll_offset + visible_rows {
+        app.browser_selected - visible_rows + 1
+    } else {
+        app.browser_scroll_offset
+    };
+
+    let hl = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let items: Vec<ListItem> = app
+        .browser_entries
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_rows)
+        .map(|(i, entry)| {
+            let is_selected = i == app.browser_selected;
+
+            let icon = if entry.is_dir { " " } else { " " };
+            let icon_color = if entry.is_dir {
+                Color::Cyan
+            } else {
+                file_color(&entry.name)
+            };
+
+            let name_style = if is_selected {
+                hl
+            } else if entry.is_dir {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let size_str = if entry.is_dir {
+                "    DIR".to_string()
+            } else {
+                format!("{:>7}", format_size(entry.size))
+            };
+
+            let size_style = if is_selected {
+                hl
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            let icon_style = if is_selected { hl } else { Style::default().fg(icon_color) };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(icon, icon_style),
+                Span::styled(format!("{:<}", &entry.name), name_style),
+                Span::styled(format!("  {}", size_str), size_style),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items);
+    f.render_widget(list, inner);
+}
+
+// ── Delete Confirm ───────────────────────────────────────────────────
+
+fn draw_delete_confirm(f: &mut Frame, app: &App) {
     let key = app
         .selected_item()
         .map(|i| i.key.as_str())
         .unwrap_or("?");
+
+    // Size the dialog to fit the key
+    let width = (key.len() as u16 + 20).max(40).min(f.area().width - 4);
+    let area = centered_rect(width, 7, f.area());
+    f.render_widget(Clear, area);
 
     let block = Block::default()
         .title(" Confirm Delete ")
@@ -477,8 +574,13 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from(vec![
             Span::raw("  Delete "),
-            Span::styled(key, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::raw("?"),
+            Span::styled(
+                key,
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ?"),
         ]),
         Line::from(""),
         Line::from(Span::styled(
@@ -487,12 +589,13 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
         )),
     ];
 
-    let dialog = Paragraph::new(lines);
-    f.render_widget(dialog, inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+// ── Search Bar ───────────────────────────────────────────────────────
+
 fn draw_search_bar(f: &mut Frame, app: &App) {
-    let area = centered_rect(50, 3, f.area());
+    let area = centered_rect(60, 3, f.area());
     f.render_widget(Clear, area);
 
     let input = Paragraph::new(Line::from(vec![
@@ -510,10 +613,37 @@ fn draw_search_bar(f: &mut Frame, app: &App) {
     f.render_widget(input, area);
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────
+
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+fn labeled_line<'a>(label: &'a str, value: &'a str, color: Color, bold: bool) -> Line<'a> {
+    let mut style = Style::default().fg(color);
+    if bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    Line::from(vec![
+        Span::styled(label, Style::default().fg(Color::DarkGray)),
+        Span::styled(value, style),
+    ])
+}
+
+fn file_color(name: &str) -> Color {
+    match name.rsplit('.').next() {
+        Some("mp4") | Some("mkv") | Some("webm") | Some("avi") | Some("mov") => Color::Green,
+        Some("mp3") | Some("flac") | Some("wav") | Some("ogg") | Some("aac") => Color::Magenta,
+        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("bmp") => {
+            Color::Yellow
+        }
+        Some("txt") | Some("md") | Some("json") | Some("toml") | Some("yaml") | Some("yml") => {
+            Color::White
+        }
+        _ => Color::White,
+    }
 }
 
 fn format_size(bytes: u64) -> String {
@@ -534,9 +664,8 @@ fn format_bytes(bytes: u64) -> String {
 
 fn format_timestamp(ts: i64) -> String {
     if ts == 0 {
-        return "—".into();
+        return "\u{2014}".into(); // em dash
     }
-    // Simple UTC formatting without pulling in chrono
     let secs_per_day: i64 = 86400;
     let days = ts / secs_per_day;
     let time_of_day = ts % secs_per_day;
@@ -544,16 +673,14 @@ fn format_timestamp(ts: i64) -> String {
     let minutes = (time_of_day % 3600) / 60;
     let seconds = time_of_day % 60;
 
-    // Days since epoch to Y-M-D (simplified)
     let mut y = 1970i64;
     let mut remaining_days = days;
-
     loop {
-        let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if remaining_days < days_in_year {
+        let diy = if is_leap(y) { 366 } else { 365 };
+        if remaining_days < diy {
             break;
         }
-        remaining_days -= days_in_year;
+        remaining_days -= diy;
         y += 1;
     }
 
