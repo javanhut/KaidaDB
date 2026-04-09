@@ -69,7 +69,13 @@ async fn run(
             if let Event::Key(key) = event::read()? {
                 match app.input_mode {
                     InputMode::Normal => match key.code {
-                        KeyCode::Char('q') => break,
+                        KeyCode::Char('q') => {
+                            if !app.browse_prefix.is_empty() {
+                                app.browse_up();
+                            } else {
+                                break;
+                            }
+                        }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break
                         }
@@ -77,7 +83,8 @@ async fn run(
                         KeyCode::Down | KeyCode::Char('j') => app.next(),
                         KeyCode::Home | KeyCode::Char('g') => app.first(),
                         KeyCode::End | KeyCode::Char('G') => app.last(),
-                        KeyCode::Enter => app.view_detail(),
+                        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.view_detail(),
+                        KeyCode::Left | KeyCode::Backspace => app.browse_up(),
                         KeyCode::Char('r') => app.refresh_media_list().await,
                         KeyCode::Char('d') => app.enter_delete_confirm(),
                         KeyCode::Char('s') => app.enter_store_mode(),

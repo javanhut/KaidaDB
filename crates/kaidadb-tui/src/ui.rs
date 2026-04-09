@@ -71,7 +71,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw("  "),
         Span::styled(
-            format!("{} items", app.filtered_items.len()),
+            format!("{} items", app.items.len()),
             Style::default().fg(Color::Yellow),
         ),
         if !app.search_query.is_empty() {
@@ -107,27 +107,67 @@ fn draw_media_list(f: &mut Frame, app: &App, area: Rect) {
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
 
+    let title = if app.browse_prefix.is_empty() {
+        " Media / ".to_string()
+    } else {
+        format!(" /{} ", app.browse_prefix)
+    };
+
     let items: Vec<ListItem> = app
-        .filtered_items
+        .browse_entries
         .iter()
         .enumerate()
-        .map(|(i, &idx)| {
-            let item = &app.items[idx];
-            let size_str = format_size(item.total_size);
-            let style = if i == app.selected {
-                hl
+        .map(|(i, entry)| {
+            let is_selected = i == app.selected;
+
+            if entry.is_dir {
+                let icon_style = if is_selected {
+                    hl
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
+                let name_style = if is_selected {
+                    hl
+                } else {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                };
+                let count_style = if is_selected {
+                    hl
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(" ", icon_style),
+                    Span::styled(format!(" {}/", entry.name), name_style),
+                    Span::styled(
+                        format!("  ({} items)", entry.item_count),
+                        count_style,
+                    ),
+                ]))
             } else {
-                Style::default().fg(Color::White)
-            };
-            let size_style = if i == app.selected {
-                hl
-            } else {
-                Style::default().fg(Color::Yellow)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:40}", truncate(&item.key, 40)), style),
-                Span::styled(format!(" {:>8}", size_str), size_style),
-            ]))
+                let icon_style = if is_selected {
+                    hl
+                } else {
+                    Style::default().fg(file_color(&entry.name))
+                };
+                let name_style = if is_selected {
+                    hl
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                let size_style = if is_selected {
+                    hl
+                } else {
+                    Style::default().fg(Color::Yellow)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(" ", icon_style),
+                    Span::styled(format!(" {}", entry.name), name_style),
+                    Span::styled(format!("  {:>8}", format_size(entry.size)), size_style),
+                ]))
+            }
         })
         .collect();
 
@@ -139,7 +179,7 @@ fn draw_media_list(f: &mut Frame, app: &App, area: Rect) {
 
     let list = List::new(items).block(
         Block::default()
-            .title(" Media ")
+            .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border)),
     );
@@ -212,7 +252,11 @@ fn detail_row<'a>(label: &'a str, value: &'a str, color: Color, bold: bool) -> R
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let keybinds = match app.input_mode {
         InputMode::Normal => {
-            " q Quit │ j/k Navigate │ Enter Detail │ s Store │ d Delete │ / Search │ r Refresh "
+            if app.browse_prefix.is_empty() {
+                " q Quit │ j/k Navigate │ Enter Open │ s Store │ d Delete │ / Search │ r Refresh "
+            } else {
+                " q/Bksp Back │ j/k Navigate │ Enter Open │ s Store │ d Delete │ / Search │ r Refresh "
+            }
         }
         InputMode::Detail => " Esc Back │ d Delete ",
         _ => "",

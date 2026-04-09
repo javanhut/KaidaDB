@@ -36,6 +36,16 @@ pub struct PathEntry {
     pub item_count: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct BrowseEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub full_key: Option<String>,
+    pub item_count: usize,
+    pub size: u64,
+}
+
+
 pub struct App {
     pub addr: String,
     pub client: Option<KaidaDbClient<Channel>>,
@@ -45,6 +55,10 @@ pub struct App {
     pub items: Vec<MediaMetadata>,
     pub filtered_items: Vec<usize>,
     pub selected: usize,
+
+    // Directory browsing in main view
+    pub browse_prefix: String,
+    pub browse_entries: Vec<BrowseEntry>,
 
     // UI state
     pub input_mode: InputMode,
@@ -97,6 +111,8 @@ impl App {
             items: Vec::new(),
             filtered_items: Vec::new(),
             selected: 0,
+            browse_prefix: String::new(),
+            browse_entries: Vec::new(),
             input_mode: InputMode::Normal,
             active_panel: Panel::List,
             status_message: "Connecting...".into(),
@@ -191,20 +207,77 @@ impl App {
                 .map(|(i, _)| i)
                 .collect();
         }
-        if self.selected >= self.filtered_items.len() {
-            self.selected = self.filtered_items.len().saturating_sub(1);
+        self.rebuild_browse_entries();
+    }
+
+    pub fn rebuild_browse_entries(&mut self) {
+        let prefix = &self.browse_prefix;
+        let mut dirs = BTreeSet::new();
+        let mut files: Vec<BrowseEntry> = Vec::new();
+
+        // Use filtered_items to respect search
+        for &idx in &self.filtered_items {
+            let item = &self.items[idx];
+            if !prefix.is_empty() && !item.key.starts_with(prefix.as_str()) {
+                continue;
+            }
+            let suffix = &item.key[prefix.len()..];
+            if suffix.is_empty() {
+                continue;
+            }
+            if let Some(slash_pos) = suffix.find('/') {
+                dirs.insert(suffix[..slash_pos].to_string());
+            } else {
+                files.push(BrowseEntry {
+                    name: suffix.to_string(),
+                    is_dir: false,
+                    full_key: Some(item.key.clone()),
+                    item_count: 0,
+                    size: item.total_size,
+                });
+            }
+        }
+
+        let mut entries: Vec<BrowseEntry> = Vec::new();
+
+        for dir_name in &dirs {
+            let dir_prefix = format!("{}{}/", prefix, dir_name);
+            let count = self
+                .filtered_items
+                .iter()
+                .filter(|&&idx| self.items[idx].key.starts_with(&dir_prefix))
+                .count();
+            entries.push(BrowseEntry {
+                name: dir_name.clone(),
+                is_dir: true,
+                full_key: None,
+                item_count: count,
+                size: 0,
+            });
+        }
+
+        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        entries.extend(files);
+
+        self.browse_entries = entries;
+        if self.selected >= self.browse_entries.len() {
+            self.selected = self.browse_entries.len().saturating_sub(1);
         }
     }
 
+    pub fn selected_browse_entry(&self) -> Option<&BrowseEntry> {
+        self.browse_entries.get(self.selected)
+    }
+
     pub fn selected_item(&self) -> Option<&MediaMetadata> {
-        self.filtered_items
-            .get(self.selected)
-            .and_then(|&idx| self.items.get(idx))
+        let entry = self.browse_entries.get(self.selected)?;
+        let key = entry.full_key.as_ref()?;
+        self.items.iter().find(|i| &i.key == key)
     }
 
     pub fn next(&mut self) {
-        if !self.filtered_items.is_empty() {
-            self.selected = (self.selected + 1).min(self.filtered_items.len() - 1);
+        if !self.browse_entries.is_empty() {
+            self.selected = (self.selected + 1).min(self.browse_entries.len() - 1);
         }
     }
 
@@ -217,21 +290,55 @@ impl App {
     }
 
     pub fn last(&mut self) {
-        if !self.filtered_items.is_empty() {
-            self.selected = self.filtered_items.len() - 1;
+        if !self.browse_entries.is_empty() {
+            self.selected = self.browse_entries.len() - 1;
         }
     }
 
+    pub fn browse_into(&mut self) {
+        if let Some(entry) = self.browse_entries.get(self.selected) {
+            if entry.is_dir {
+                self.browse_prefix = format!("{}{}/", self.browse_prefix, entry.name);
+                self.selected = 0;
+                self.rebuild_browse_entries();
+            }
+        }
+    }
+
+    pub fn browse_up(&mut self) {
+        if self.browse_prefix.is_empty() {
+            return;
+        }
+        let trimmed = self.browse_prefix.trim_end_matches('/');
+        if let Some(pos) = trimmed.rfind('/') {
+            self.browse_prefix = trimmed[..=pos].to_string();
+        } else {
+            self.browse_prefix.clear();
+        }
+        self.selected = 0;
+        self.rebuild_browse_entries();
+    }
+
     pub fn view_detail(&mut self) {
-        if let Some(item) = self.selected_item() {
-            self.detail_item = Some(item.clone());
-            self.input_mode = InputMode::Detail;
+        if let Some(entry) = self.browse_entries.get(self.selected) {
+            if entry.is_dir {
+                self.browse_into();
+            } else if let Some(item) = self.selected_item() {
+                self.detail_item = Some(item.clone());
+                self.input_mode = InputMode::Detail;
+            }
         }
     }
 
     pub fn back(&mut self) {
-        if let InputMode::Detail = self.input_mode {
-            self.input_mode = InputMode::Normal;
+        match self.input_mode {
+            InputMode::Detail => {
+                self.input_mode = InputMode::Normal;
+            }
+            InputMode::Normal => {
+                self.browse_up();
+            }
+            _ => {}
         }
     }
 
@@ -666,6 +773,15 @@ impl App {
     }
 
     pub fn enter_delete_confirm(&mut self) {
+        if let Some(entry) = self.selected_browse_entry() {
+            if entry.is_dir {
+                self.status_message = format!(
+                    "Directory has {} items, delete them first (directory disappears when empty)",
+                    entry.item_count
+                );
+                return;
+            }
+        }
         if self.selected_item().is_some() {
             self.input_mode = InputMode::DeleteConfirm;
         }
