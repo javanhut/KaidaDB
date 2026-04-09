@@ -12,22 +12,63 @@ A Rust database purpose-built for storing and streaming media. KaidaDB provides 
 - **Durability** — append-only write-ahead log with in-memory BTreeMap index, rebuilt on startup
 - **Zero external database dependencies** — pure Rust storage engine
 
-## Quick Start
+## Installation
 
-### Build
+### Quick Install
+
+```bash
+# Clone and install all binaries (server, cli, tui) to ~/.local/bin
+git clone <repo-url>
+cd KaidaDB
+./install.sh
+```
+
+This builds in release mode and installs `kaidadb-server`, `kaidadb-cli`, and `kaidadb-tui` to `~/.local/bin`, with a default config at `~/.config/kaidadb/config.toml` and data directory at `~/.local/share/kaidadb`.
+
+### Install Options
+
+```bash
+# Custom install location
+./install.sh --prefix /usr/local/bin --data /var/lib/kaidadb --config /etc/kaidadb
+
+# Server only (no CLI or TUI)
+./install.sh --server-only
+
+# CLI only (for remote management)
+./install.sh --cli-only
+
+# Debug build
+./install.sh --debug
+
+# Skip config generation
+./install.sh --no-config
+
+# Uninstall binaries
+./install.sh --uninstall
+```
+
+### Manual Build
 
 ```bash
 cargo build --release
+
+# Binaries are in target/release/
+ls target/release/kaidadb-{server,cli,tui}
 ```
+
+## Quick Start
 
 ### Run the Server
 
 ```bash
+# Using the installed binary
+kaidadb-server --config ~/.config/kaidadb/config.toml
+
+# Or with cargo (development)
+cargo run -p kaidadb-server -- --config config.toml
+
 # With defaults (gRPC :50051, REST :8080, data in ./data)
 cargo run -p kaidadb-server
-
-# With a config file
-cargo run -p kaidadb-server -- --config config.toml
 ```
 
 ### Store and Retrieve Media
@@ -449,6 +490,123 @@ cargo test -p kaidadb-storage --test integration
 | kaidadb-storage (integration) | 15 | Full round-trips, range reads, overwrites, deduplication with ref-counted deletion, streaming, cache integration, persistence across restarts, large files |
 | kaidadb-cache | 4 | Hit/miss tracking, LRU eviction, invalidation, size tracking |
 | **Total** | **43** | |
+
+## Deployment
+
+### Running as a systemd Service
+
+Create a service file at `/etc/systemd/system/kaidadb.service`:
+
+```ini
+[Unit]
+Description=KaidaDB Media Database
+After=network.target
+
+[Service]
+Type=simple
+User=kaidadb
+Group=kaidadb
+ExecStart=/usr/local/bin/kaidadb-server --config /etc/kaidadb/config.toml
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kaidadb
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Set it up:
+
+```bash
+# Install to system paths
+sudo ./install.sh --prefix /usr/local/bin --data /var/lib/kaidadb --config /etc/kaidadb
+
+# Create a dedicated user
+sudo useradd -r -s /usr/sbin/nologin -d /var/lib/kaidadb kaidadb
+sudo chown -R kaidadb:kaidadb /var/lib/kaidadb
+
+# Edit config as needed
+sudo vim /etc/kaidadb/config.toml
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable --now kaidadb
+
+# Check status
+sudo systemctl status kaidadb
+journalctl -u kaidadb -f
+```
+
+### Running with Docker
+
+```dockerfile
+FROM rust:1.82-slim AS builder
+WORKDIR /build
+COPY . .
+RUN apt-get update && apt-get install -y protobuf-compiler && \
+    cargo build --release -p kaidadb-server
+
+FROM debian:bookworm-slim
+COPY --from=builder /build/target/release/kaidadb-server /usr/local/bin/
+COPY config.toml /etc/kaidadb/config.toml
+EXPOSE 50051 8080
+VOLUME /data
+ENV KAIDADB_DATA_DIR=/data
+CMD ["kaidadb-server", "--config", "/etc/kaidadb/config.toml"]
+```
+
+```bash
+# Build and run
+docker build -t kaidadb .
+docker run -d -p 8080:8080 -p 50051:50051 -v kaidadb-data:/data --name kaidadb kaidadb
+
+# Verify
+curl http://localhost:8080/v1/health
+```
+
+### Remote CLI Access
+
+Install the CLI on any machine to manage a remote server:
+
+```bash
+# Install CLI only
+./install.sh --cli-only --no-config
+
+# Point to the remote server
+kaidadb-cli --addr http://your-server:50051 health
+kaidadb-cli --addr http://your-server:50051 list
+kaidadb-cli --addr http://your-server:50051 store my-video ./video.mp4
+```
+
+### Using with Reelscape (OSSFlix)
+
+KaidaDB integrates with [Reelscape](../OSSFlix/) as an optional media storage backend. Once KaidaDB is running:
+
+1. Open Reelscape Settings and enter the KaidaDB REST URL (e.g., `http://localhost:8080` or `http://your-server:8080`)
+2. Click **Test** to verify the connection
+3. Ingest media via the API:
+   ```bash
+   curl -X POST http://localhost:3000/api/kaidadb/ingest \
+     -H "Content-Type: application/json" \
+     -d '{"src": "/media/movies/your_movie/movie.mp4"}'
+   ```
+4. Playback will automatically stream from KaidaDB with full seeking support
+
+### Production Checklist
+
+- [ ] Use a dedicated data partition with sufficient storage
+- [ ] Set `KAIDADB_DATA_DIR` to a path on the data partition
+- [ ] Tune `cache.max_size` based on available RAM (recommended: 25-50% of free memory)
+- [ ] Increase `storage.chunk_size` for large files (4-8 MiB reduces index overhead)
+- [ ] Set up log rotation for `journalctl` or redirect logs
+- [ ] Back up `$DATA_DIR/index/` periodically (the WAL is the source of truth)
+- [ ] Use a reverse proxy (nginx/caddy) for TLS termination on the REST port
+- [ ] Firewall: expose only the REST port (8080) publicly; keep gRPC (50051) internal
 
 ## Roadmap
 
