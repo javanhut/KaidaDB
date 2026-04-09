@@ -11,6 +11,7 @@ use crate::app::{App, InputMode, Panel};
 pub fn draw(f: &mut Frame, app: &App) {
     match app.input_mode {
         InputMode::Detail => draw_detail_view(f, app),
+        InputMode::PathBrowser | InputMode::NewDirInput => draw_path_browser_view(f, app),
         InputMode::StoreKey | InputMode::FileBrowser => draw_store_view(f, app),
         InputMode::DeleteConfirm => {
             draw_main_layout(f, app);
@@ -338,6 +339,232 @@ fn draw_detail_view(f: &mut Frame, app: &App) {
     f.render_widget(status, chunks[2]);
 }
 
+// ── Path Browser View (navigate KaidaDB virtual directory tree) ──────
+
+fn draw_path_browser_view(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // title
+            Constraint::Length(3), // current path
+            Constraint::Min(8),   // path entries
+            Constraint::Length(3), // status/keybinds
+        ])
+        .split(area);
+
+    // Title bar
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled(
+            " Store Media ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            "Navigate to a destination path, then pick a file",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    f.render_widget(title, chunks[0]);
+
+    // Current path display
+    let path_display = if app.path_prefix.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", app.path_prefix)
+    };
+    let path_line = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "  Path: ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            &path_display,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(path_line, chunks[1]);
+
+    // Path entries list
+    let is_active = app.input_mode == InputMode::PathBrowser;
+    let border_color = if is_active {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+
+    let block = Block::default()
+        .title(if app.path_entries.is_empty() {
+            " Empty - press 'n' to create a directory or Tab to pick a file "
+        } else {
+            " Directories & Items "
+        })
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let inner = block.inner(chunks[2]);
+    f.render_widget(block, chunks[2]);
+
+    if inner.height > 0 {
+        let visible_rows = inner.height as usize;
+
+        let scroll_offset = if app.path_selected < app.path_scroll_offset {
+            app.path_selected
+        } else if app.path_selected >= app.path_scroll_offset + visible_rows {
+            app.path_selected - visible_rows + 1
+        } else {
+            app.path_scroll_offset
+        };
+
+        let hl = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+
+        let items: Vec<ListItem> = app
+            .path_entries
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(visible_rows)
+            .map(|(i, entry)| {
+                let is_selected = i == app.path_selected;
+
+                if entry.is_dir {
+                    let name_style = if is_selected {
+                        hl
+                    } else {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    };
+                    let count_style = if is_selected {
+                        hl
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    let icon_style = if is_selected {
+                        hl
+                    } else {
+                        Style::default().fg(Color::Cyan)
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled("  ", icon_style),
+                        Span::styled(format!("{}/", entry.name), name_style),
+                        Span::styled(
+                            format!("  ({} items)", entry.item_count),
+                            count_style,
+                        ),
+                    ]))
+                } else {
+                    let name_style = if is_selected {
+                        hl
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    let icon_style = if is_selected {
+                        hl
+                    } else {
+                        Style::default().fg(file_color(&entry.name))
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled("  ", icon_style),
+                        Span::styled(&entry.name, name_style),
+                    ]))
+                }
+            })
+            .collect();
+
+        let list = List::new(items);
+        f.render_widget(list, inner);
+    }
+
+    // New directory input overlay
+    if app.input_mode == InputMode::NewDirInput {
+        let dialog_width = 50u16.min(area.width.saturating_sub(4));
+        let dialog_area = centered_rect(dialog_width, 5, area);
+        f.render_widget(Clear, dialog_area);
+
+        let dir_text = &app.new_dir_input;
+        let cursor_pos = app.new_dir_cursor;
+        let (before, after) = dir_text.split_at(cursor_pos.min(dir_text.len()));
+        let (cursor_char, rest) = if after.is_empty() {
+            (" ", "")
+        } else {
+            after.split_at(
+                after
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(after.len()),
+            )
+        };
+
+        let lines = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  Name: ", Style::default().fg(Color::Yellow)),
+                Span::styled(before, Style::default().fg(Color::White)),
+                Span::styled(
+                    cursor_char,
+                    Style::default().fg(Color::Black).bg(Color::Yellow),
+                ),
+                Span::styled(rest, Style::default().fg(Color::White)),
+            ]),
+            Line::from(Span::styled(
+                "  Enter: confirm │ Esc: cancel",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+
+        let dialog = Paragraph::new(lines).block(
+            Block::default()
+                .title(" New Directory ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+        f.render_widget(dialog, dialog_area);
+    }
+
+    // Keybinds
+    let help = match app.input_mode {
+        InputMode::PathBrowser => {
+            " Enter/Right: open dir │ Left: parent │ n: new dir │ Tab/f: pick file │ Esc: cancel "
+        }
+        InputMode::NewDirInput => " Enter: confirm │ Esc: cancel ",
+        _ => "",
+    };
+    let status = Paragraph::new(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(&app.status_message, Style::default().fg(Color::White)),
+        Span::raw("  "),
+        Span::styled(help, Style::default().fg(Color::DarkGray)),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(status, chunks[3]);
+}
+
 // ── Store View (full screen with file browser) ───────────────────────
 
 fn draw_store_view(f: &mut Frame, app: &App) {
@@ -354,6 +581,11 @@ fn draw_store_view(f: &mut Frame, app: &App) {
         .split(area);
 
     // Title bar
+    let subtitle = match app.input_mode {
+        InputMode::FileBrowser => "Select a file to store",
+        InputMode::StoreKey => "Review the key and press Enter to store",
+        _ => "Select a file to store",
+    };
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
             " Store Media ",
@@ -363,7 +595,7 @@ fn draw_store_view(f: &mut Frame, app: &App) {
         ),
         Span::raw("  "),
         Span::styled(
-            "Select a file and enter a key to store it in KaidaDB",
+            format!("Path: {}  -  {}", if app.path_prefix.is_empty() { "/" } else { &app.path_prefix }, subtitle),
             Style::default().fg(Color::DarkGray),
         ),
     ]))
@@ -383,10 +615,10 @@ fn draw_store_view(f: &mut Frame, app: &App) {
     // Keybinds
     let help = match app.input_mode {
         InputMode::StoreKey => {
-            " Tab/Enter: browse files │ Left/Right: move cursor │ Esc: cancel "
+            " Enter: confirm store │ Tab: back to file browser │ Left/Right: move cursor │ Esc: cancel "
         }
         InputMode::FileBrowser => {
-            " Enter: select file/open dir │ Backspace/Left: parent dir │ Tab: edit key │ Esc: cancel "
+            " Enter: select file/open dir │ Left: parent dir │ Tab: back to path │ Esc: cancel "
         }
         _ => "",
     };

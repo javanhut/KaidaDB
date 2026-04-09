@@ -102,12 +102,54 @@ async fn run(
                         }
                         _ => {}
                     },
+                    InputMode::PathBrowser => match key.code {
+                        KeyCode::Esc => {
+                            app.input_mode = InputMode::Normal;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => app.path_previous(),
+                        KeyCode::Down | KeyCode::Char('j') => app.path_next(),
+                        KeyCode::Home | KeyCode::Char('g') => app.path_first(),
+                        KeyCode::End | KeyCode::Char('G') => app.path_last(),
+                        KeyCode::Enter | KeyCode::Right => {
+                            if let Some(entry) = app.path_selected_entry() {
+                                if entry.is_dir {
+                                    app.path_enter();
+                                }
+                            }
+                        }
+                        KeyCode::Left | KeyCode::Backspace => app.path_go_up(),
+                        KeyCode::Char('n') => app.enter_new_dir_mode(),
+                        KeyCode::Tab | KeyCode::Char('f') => {
+                            app.advance_to_file_browser();
+                        }
+                        _ => {}
+                    },
+                    InputMode::NewDirInput => match key.code {
+                        KeyCode::Enter => app.confirm_new_dir(),
+                        KeyCode::Esc => {
+                            app.input_mode = InputMode::PathBrowser;
+                        }
+                        KeyCode::Left => app.new_dir_move_left(),
+                        KeyCode::Right => app.new_dir_move_right(),
+                        KeyCode::Backspace => app.new_dir_backspace(),
+                        KeyCode::Delete => app.new_dir_delete(),
+                        KeyCode::Char(c) => app.new_dir_insert_char(c),
+                        _ => {}
+                    },
                     InputMode::StoreKey => match key.code {
-                        KeyCode::Enter | KeyCode::Tab => app.advance_to_browser(),
+                        KeyCode::Enter => {
+                            if !app.store_key_input.is_empty() {
+                                if let Some(file_path) = app.selected_file_path.clone() {
+                                    app.execute_store_file(&file_path).await;
+                                    app.input_mode = InputMode::Normal;
+                                }
+                            }
+                        }
                         KeyCode::Esc => {
                             app.store_key_input.clear();
                             app.input_mode = InputMode::Normal;
                         }
+                        KeyCode::Tab => app.advance_to_browser(),
                         KeyCode::Left => app.store_key_move_left(),
                         KeyCode::Right => app.store_key_move_right(),
                         KeyCode::Home => app.store_key_home(),
@@ -120,11 +162,11 @@ async fn run(
                     InputMode::FileBrowser => match key.code {
                         KeyCode::Esc => {
                             app.store_key_input.clear();
+                            app.selected_file_path = None;
                             app.input_mode = InputMode::Normal;
                         }
                         KeyCode::Tab => {
-                            // Tab back to key input
-                            app.input_mode = InputMode::StoreKey;
+                            app.back_to_path_browser();
                         }
                         KeyCode::Up | KeyCode::Char('k') => app.browser_previous(),
                         KeyCode::Down | KeyCode::Char('j') => app.browser_next(),
@@ -134,7 +176,6 @@ async fn run(
                         KeyCode::PageUp => app.browser_page_up(20),
                         KeyCode::Left | KeyCode::Backspace => app.browser_go_up(),
                         KeyCode::Right => {
-                            // Right arrow enters dirs, same as Enter for dirs
                             if let Some(entry) = app.browser_selected_entry() {
                                 if entry.is_dir {
                                     app.browser_enter();
@@ -145,21 +186,13 @@ async fn run(
                             if app.browser_selected_is_file() {
                                 let entry = app.browser_entries[app.browser_selected].clone();
                                 app.suggest_key_from_path(&entry.path);
-                                if app.store_key_input.is_empty() {
-                                    // Need a key first
-                                    app.status_message =
-                                        "Enter a key first (Tab to go back)".into();
-                                    app.input_mode = InputMode::StoreKey;
-                                } else {
-                                    app.execute_store_file(&entry.path).await;
-                                    app.input_mode = InputMode::Normal;
-                                }
+                                app.selected_file_path = Some(entry.path);
+                                app.input_mode = InputMode::StoreKey;
                             } else {
                                 app.browser_enter();
                             }
                         }
                         KeyCode::Char('.') => {
-                            // Toggle showing hidden files — just reload for now
                             app.load_browser_dir();
                         }
                         _ => {}

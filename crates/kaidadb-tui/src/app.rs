@@ -1,4 +1,5 @@
 use crate::client::{self, KaidaDbClient, MediaMetadata};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tonic::transport::Channel;
 
@@ -6,6 +7,8 @@ use tonic::transport::Channel;
 pub enum InputMode {
     Normal,
     Search,
+    PathBrowser,
+    NewDirInput,
     StoreKey,
     FileBrowser,
     DeleteConfirm,
@@ -24,6 +27,13 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub is_dir: bool,
     pub size: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PathEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub item_count: usize,
 }
 
 pub struct App {
@@ -48,6 +58,17 @@ pub struct App {
     // Store dialog
     pub store_key_input: String,
     pub store_key_cursor: usize,
+    pub selected_file_path: Option<PathBuf>,
+
+    // Path browser (virtual KaidaDB directory tree)
+    pub path_prefix: String,
+    pub path_entries: Vec<PathEntry>,
+    pub path_selected: usize,
+    pub path_scroll_offset: usize,
+
+    // New directory input
+    pub new_dir_input: String,
+    pub new_dir_cursor: usize,
 
     // File browser
     pub browser_dir: PathBuf,
@@ -83,6 +104,13 @@ impl App {
             search_query: String::new(),
             store_key_input: String::new(),
             store_key_cursor: 0,
+            selected_file_path: None,
+            path_prefix: String::new(),
+            path_entries: Vec::new(),
+            path_selected: 0,
+            path_scroll_offset: 0,
+            new_dir_input: String::new(),
+            new_dir_cursor: 0,
             browser_dir: home,
             browser_entries: Vec::new(),
             browser_selected: 0,
@@ -230,14 +258,188 @@ impl App {
         }
     }
 
-    // --- Store / File Browser ---
+    // --- Path Browser (virtual KaidaDB directory tree) ---
 
     pub fn enter_store_mode(&mut self) {
         self.store_key_input.clear();
         self.store_key_cursor = 0;
-        self.input_mode = InputMode::StoreKey;
+        self.path_prefix.clear();
+        self.input_mode = InputMode::PathBrowser;
+        self.load_path_entries();
+    }
+
+    pub fn load_path_entries(&mut self) {
+        let prefix = &self.path_prefix;
+        let mut dirs = BTreeSet::new();
+        let mut files = Vec::new();
+
+        for item in &self.items {
+            if !prefix.is_empty() && !item.key.starts_with(prefix.as_str()) {
+                continue;
+            }
+            let suffix = &item.key[prefix.len()..];
+            if suffix.is_empty() {
+                continue;
+            }
+            if let Some(slash_pos) = suffix.find('/') {
+                dirs.insert(suffix[..slash_pos].to_string());
+            } else {
+                files.push(suffix.to_string());
+            }
+        }
+
+        let mut entries: Vec<PathEntry> = Vec::new();
+
+        // Directories first
+        for dir_name in &dirs {
+            let dir_prefix = format!("{}{}/", prefix, dir_name);
+            let count = self
+                .items
+                .iter()
+                .filter(|i| i.key.starts_with(&dir_prefix))
+                .count();
+            entries.push(PathEntry {
+                name: dir_name.clone(),
+                is_dir: true,
+                item_count: count,
+            });
+        }
+
+        // Then files at this level
+        files.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        for name in files {
+            entries.push(PathEntry {
+                name,
+                is_dir: false,
+                item_count: 0,
+            });
+        }
+
+        self.path_entries = entries;
+        self.path_selected = 0;
+        self.path_scroll_offset = 0;
+    }
+
+    pub fn path_next(&mut self) {
+        if !self.path_entries.is_empty() {
+            self.path_selected = (self.path_selected + 1).min(self.path_entries.len() - 1);
+        }
+    }
+
+    pub fn path_previous(&mut self) {
+        self.path_selected = self.path_selected.saturating_sub(1);
+    }
+
+    pub fn path_first(&mut self) {
+        self.path_selected = 0;
+    }
+
+    pub fn path_last(&mut self) {
+        if !self.path_entries.is_empty() {
+            self.path_selected = self.path_entries.len() - 1;
+        }
+    }
+
+    pub fn path_enter(&mut self) {
+        if let Some(entry) = self.path_entries.get(self.path_selected) {
+            if entry.is_dir {
+                self.path_prefix = format!("{}{}/", self.path_prefix, entry.name);
+                self.load_path_entries();
+            }
+        }
+    }
+
+    pub fn path_go_up(&mut self) {
+        if self.path_prefix.is_empty() {
+            return;
+        }
+        // Remove trailing slash, then find last slash
+        let trimmed = self.path_prefix.trim_end_matches('/');
+        if let Some(pos) = trimmed.rfind('/') {
+            self.path_prefix = trimmed[..=pos].to_string();
+        } else {
+            self.path_prefix.clear();
+        }
+        self.load_path_entries();
+    }
+
+    pub fn path_selected_entry(&self) -> Option<&PathEntry> {
+        self.path_entries.get(self.path_selected)
+    }
+
+    pub fn enter_new_dir_mode(&mut self) {
+        self.new_dir_input.clear();
+        self.new_dir_cursor = 0;
+        self.input_mode = InputMode::NewDirInput;
+    }
+
+    pub fn new_dir_insert_char(&mut self, c: char) {
+        self.new_dir_input.insert(self.new_dir_cursor, c);
+        self.new_dir_cursor += c.len_utf8();
+    }
+
+    pub fn new_dir_backspace(&mut self) {
+        if self.new_dir_cursor > 0 {
+            let prev = self.new_dir_input[..self.new_dir_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.new_dir_input.drain(prev..self.new_dir_cursor);
+            self.new_dir_cursor = prev;
+        }
+    }
+
+    pub fn new_dir_delete(&mut self) {
+        if self.new_dir_cursor < self.new_dir_input.len() {
+            let next = self.new_dir_input[self.new_dir_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.new_dir_cursor + i)
+                .unwrap_or(self.new_dir_input.len());
+            self.new_dir_input.drain(self.new_dir_cursor..next);
+        }
+    }
+
+    pub fn new_dir_move_left(&mut self) {
+        if self.new_dir_cursor > 0 {
+            self.new_dir_cursor = self.new_dir_input[..self.new_dir_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+    }
+
+    pub fn new_dir_move_right(&mut self) {
+        if self.new_dir_cursor < self.new_dir_input.len() {
+            self.new_dir_cursor = self.new_dir_input[self.new_dir_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.new_dir_cursor + i)
+                .unwrap_or(self.new_dir_input.len());
+        }
+    }
+
+    pub fn confirm_new_dir(&mut self) {
+        let dir_name = self.new_dir_input.trim().to_string();
+        if dir_name.is_empty() {
+            self.input_mode = InputMode::PathBrowser;
+            return;
+        }
+        // Navigate into the new directory (it doesn't need to exist in the DB yet)
+        self.path_prefix = format!("{}{}/", self.path_prefix, dir_name);
+        self.load_path_entries();
+        self.input_mode = InputMode::PathBrowser;
+        self.status_message = format!("Created path: {}", self.path_prefix);
+    }
+
+    pub fn advance_to_file_browser(&mut self) {
+        self.input_mode = InputMode::FileBrowser;
         self.load_browser_dir();
     }
+
+    // --- Store Key / File Browser ---
 
     pub fn store_key_insert_char(&mut self, c: char) {
         self.store_key_input.insert(self.store_key_cursor, c);
@@ -297,6 +499,11 @@ impl App {
 
     pub fn advance_to_browser(&mut self) {
         self.input_mode = InputMode::FileBrowser;
+    }
+
+    pub fn back_to_path_browser(&mut self) {
+        self.input_mode = InputMode::PathBrowser;
+        self.load_path_entries();
     }
 
     pub fn load_browser_dir(&mut self) {
@@ -391,13 +598,11 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Auto-suggest a key from the selected file path
+    /// Auto-suggest a key from the path_prefix + filename
     pub fn suggest_key_from_path(&mut self, path: &Path) {
-        if !self.store_key_input.is_empty() {
-            return; // Don't overwrite user input
-        }
-        if let Some(stem) = path.file_stem() {
-            self.store_key_input = stem.to_string_lossy().to_string();
+        if let Some(filename) = path.file_name() {
+            let name = filename.to_string_lossy();
+            self.store_key_input = format!("{}{}", self.path_prefix, name);
             self.store_key_cursor = self.store_key_input.len();
         }
     }
