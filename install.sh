@@ -34,6 +34,7 @@ Options:
   --server-only     Only install kaidadb-server
   --cli-only        Only install kaidadb-cli
   --no-config       Skip config file generation
+  --service         Install service/daemon for auto-start on boot
   --uninstall       Remove installed binaries and config
   -h, --help        Show this help
 EOF
@@ -44,6 +45,7 @@ INSTALL_SERVER=true
 INSTALL_CLI=true
 INSTALL_TUI=true
 GENERATE_CONFIG=true
+INSTALL_SERVICE=false
 UNINSTALL=false
 
 while [[ $# -gt 0 ]]; do
@@ -56,6 +58,7 @@ while [[ $# -gt 0 ]]; do
         --server-only)  INSTALL_CLI=false; INSTALL_TUI=false; shift ;;
         --cli-only)     INSTALL_SERVER=false; INSTALL_TUI=false; shift ;;
         --no-config)    GENERATE_CONFIG=false; shift ;;
+        --service)      INSTALL_SERVICE=true; shift ;;
         --uninstall)    UNINSTALL=true; shift ;;
         -h|--help)      usage; exit 0 ;;
         *)              err "Unknown option: $1"; usage; exit 1 ;;
@@ -66,6 +69,21 @@ done
 
 if $UNINSTALL; then
     info "Uninstalling KaidaDB..."
+
+    # Stop and remove services
+    if [[ -f "$HOME/.config/systemd/user/kaidadb.service" ]]; then
+        systemctl --user stop kaidadb 2>/dev/null || true
+        systemctl --user disable kaidadb 2>/dev/null || true
+        rm -f "$HOME/.config/systemd/user/kaidadb.service"
+        systemctl --user daemon-reload 2>/dev/null || true
+        ok "Removed systemd user service"
+    fi
+    if [[ -f "$INSTALL_DIR/kaidadb-ctl" ]]; then
+        "$INSTALL_DIR/kaidadb-ctl" stop 2>/dev/null || true
+        rm -f "$INSTALL_DIR/kaidadb-ctl"
+        ok "Removed kaidadb-ctl"
+    fi
+
     for bin in kaidadb-server kaidadb-cli kaidadb-tui; do
         if [[ -f "$INSTALL_DIR/$bin" ]]; then
             rm -f "$INSTALL_DIR/$bin"
@@ -190,6 +208,90 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
     echo ""
     echo "    # fish:"
     echo "    fish_add_path $INSTALL_DIR"
+    echo ""
+fi
+
+# ── Service installation ──
+
+# Replaces @@PLACEHOLDERS@@ in service templates with actual paths
+render_template() {
+    local src="$1" dst="$2"
+    sed \
+        -e "s|@@INSTALL_DIR@@|$INSTALL_DIR|g" \
+        -e "s|@@CONFIG_DIR@@|$CONFIG_DIR|g" \
+        -e "s|@@DATA_DIR@@|$DATA_DIR|g" \
+        "$src" > "$dst"
+}
+
+if $INSTALL_SERVICE; then
+    info "Setting up service..."
+
+    SERVICE_DIR="$SCRIPT_DIR/service"
+
+    # Always install kaidadb-ctl (works everywhere as a fallback)
+    render_template "$SERVICE_DIR/kaidadb-ctl" "$INSTALL_DIR/kaidadb-ctl"
+    chmod +x "$INSTALL_DIR/kaidadb-ctl"
+    ok "Installed $INSTALL_DIR/kaidadb-ctl"
+
+    if pidof systemd &>/dev/null && command -v systemctl &>/dev/null; then
+        # ── systemd (user service, no root needed) ──
+        SYSTEMD_DIR="$HOME/.config/systemd/user"
+        mkdir -p "$SYSTEMD_DIR"
+        render_template "$SERVICE_DIR/kaidadb.service" "$SYSTEMD_DIR/kaidadb.service"
+        systemctl --user daemon-reload
+        systemctl --user enable kaidadb
+        ok "Installed systemd user service"
+        echo ""
+        echo "  Manage with:"
+        echo "    systemctl --user start kaidadb"
+        echo "    systemctl --user stop kaidadb"
+        echo "    systemctl --user status kaidadb"
+        echo "    journalctl --user -u kaidadb -f"
+        echo ""
+        echo "  To start on boot (even without login):"
+        echo "    loginctl enable-linger $(whoami)"
+        echo ""
+
+    elif command -v rc-service &>/dev/null; then
+        # ── OpenRC ──
+        warn "OpenRC detected — root required to install system service"
+        render_template "$SERVICE_DIR/kaidadb.openrc" "/tmp/kaidadb.openrc"
+        echo ""
+        echo "  To install the OpenRC service, run:"
+        echo "    sudo cp /tmp/kaidadb.openrc /etc/init.d/kaidadb"
+        echo "    sudo chmod +x /etc/init.d/kaidadb"
+        echo "    sudo rc-update add kaidadb default"
+        echo "    sudo rc-service kaidadb start"
+        echo ""
+
+    elif command -v sv &>/dev/null && [[ -d /etc/sv ]]; then
+        # ── runit ──
+        warn "Runit detected — creating service directory"
+        RUNIT_DIR="/tmp/kaidadb-runit"
+        mkdir -p "$RUNIT_DIR"
+        cat > "$RUNIT_DIR/run" <<RUNIT
+#!/bin/sh
+exec chpst -u $(whoami) $INSTALL_DIR/kaidadb-server --config $CONFIG_DIR/config.toml
+RUNIT
+        chmod +x "$RUNIT_DIR/run"
+        echo ""
+        echo "  To install the runit service, run:"
+        echo "    sudo cp -r $RUNIT_DIR /etc/sv/kaidadb"
+        echo "    sudo ln -s /etc/sv/kaidadb /var/service/kaidadb"
+        echo ""
+
+    else
+        warn "No supported init system detected"
+    fi
+
+    ok "kaidadb-ctl installed as a portable fallback"
+    echo ""
+    echo "  Portable daemon control (works on any system):"
+    echo "    kaidadb-ctl start     # start in background"
+    echo "    kaidadb-ctl stop      # graceful shutdown"
+    echo "    kaidadb-ctl restart   # restart"
+    echo "    kaidadb-ctl status    # check if running"
+    echo "    kaidadb-ctl logs      # tail the log file"
     echo ""
 fi
 

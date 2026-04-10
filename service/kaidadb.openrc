@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+
+description="KaidaDB Media Database Server"
+command="@@INSTALL_DIR@@/kaidadb-server"
+command_args="--config @@CONFIG_DIR@@/config.toml"
+command_background=true
+pidfile="/run/kaidadb/kaidadb.pid"
+directory="@@DATA_DIR@@"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    checkpath --directory --owner root:root --mode 0755 /run/kaidadb
+}

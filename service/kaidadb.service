@@ -1,0 +1,14 @@
+[Unit]
+Description=KaidaDB Media Database Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=@@INSTALL_DIR@@/kaidadb-server --config @@CONFIG_DIR@@/config.toml
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=kaidadb=info
+WorkingDirectory=@@DATA_DIR@@
+
+[Install]
+WantedBy=default.target

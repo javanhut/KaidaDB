@@ -43,7 +43,10 @@ This builds in release mode and installs `kaidadb-server`, `kaidadb-cli`, and `k
 # Skip config generation
 ./install.sh --no-config
 
-# Uninstall binaries
+# Install with service (auto-start on boot)
+./install.sh --service
+
+# Uninstall binaries and services
 ./install.sh --uninstall
 ```
 
@@ -243,6 +246,11 @@ KaidaDB/
 ├── Cargo.toml                    # Workspace root
 ├── proto/kaidadb.proto          # gRPC service definition
 ├── config.toml                   # Default configuration
+├── install.sh                    # Installer (--service for daemon setup)
+├── service/
+│   ├── kaidadb.service          # systemd unit template
+│   ├── kaidadb.openrc           # OpenRC init script template
+│   └── kaidadb-ctl              # Portable daemon manager (any distro)
 ├── crates/
 │   ├── kaidadb-common/          # Shared types, errors, config
 │   ├── kaidadb-storage/         # Storage engine (chunks, index, mmap)
@@ -493,53 +501,78 @@ cargo test -p kaidadb-storage --test integration
 
 ## Deployment
 
-### Running as a systemd Service
+### Running as a Service
 
-Create a service file at `/etc/systemd/system/kaidadb.service`:
+The `--service` flag auto-detects your init system and installs the appropriate service configuration. It also installs `kaidadb-ctl`, a portable daemon manager that works on any Linux distribution as a fallback.
 
-```ini
-[Unit]
-Description=KaidaDB Media Database
-After=network.target
-
-[Service]
-Type=simple
-User=kaidadb
-Group=kaidadb
-ExecStart=/usr/local/bin/kaidadb-server --config /etc/kaidadb/config.toml
-Restart=on-failure
-RestartSec=5
-
-# Hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/kaidadb
-
-[Install]
-WantedBy=multi-user.target
+```bash
+./install.sh --service
 ```
 
-Set it up:
+**Supported init systems:**
+
+| Init System | Distros | What `--service` does |
+|---|---|---|
+| **systemd** | Arch, Ubuntu, Debian, Fedora, RHEL, SUSE, etc. | Installs a user service (no root required), enables it |
+| **OpenRC** | Alpine, Gentoo, Artix | Renders init script to `/tmp`, prints `sudo` commands to install |
+| **runit** | Void, Artix (runit) | Creates run script in `/tmp`, prints `sudo` commands to link it |
+| **Other / none** | Any | `kaidadb-ctl` is always installed as a portable fallback |
+
+#### systemd (most distros)
+
+When systemd is detected, a **user service** is installed — no root required:
+
+```bash
+# Start the server
+systemctl --user start kaidadb
+
+# Stop the server
+systemctl --user stop kaidadb
+
+# View logs
+journalctl --user -u kaidadb -f
+
+# Check status
+systemctl --user status kaidadb
+```
+
+To start KaidaDB on boot even without being logged in:
+
+```bash
+loginctl enable-linger $(whoami)
+```
+
+#### kaidadb-ctl (any distro)
+
+`kaidadb-ctl` is a portable daemon manager installed alongside every `--service` setup. It manages the server process with a PID file and log file, with no dependencies beyond bash:
+
+```bash
+kaidadb-ctl start      # start in background (nohup + PID file)
+kaidadb-ctl stop       # graceful shutdown (SIGTERM, then SIGKILL after 10s)
+kaidadb-ctl restart    # stop + start
+kaidadb-ctl status     # check if running
+kaidadb-ctl logs       # tail -f the log file
+```
+
+Logs are written to `~/.local/state/kaidadb/kaidadb.log`.
+
+#### System-wide service (production)
+
+For production deployments that should run as a dedicated user:
 
 ```bash
 # Install to system paths
-sudo ./install.sh --prefix /usr/local/bin --data /var/lib/kaidadb --config /etc/kaidadb
+sudo ./install.sh --prefix /usr/local/bin --data /var/lib/kaidadb --config /etc/kaidadb --service
 
 # Create a dedicated user
 sudo useradd -r -s /usr/sbin/nologin -d /var/lib/kaidadb kaidadb
 sudo chown -R kaidadb:kaidadb /var/lib/kaidadb
 
-# Edit config as needed
-sudo vim /etc/kaidadb/config.toml
+# Edit the generated systemd unit to set User=kaidadb
+# Or for OpenRC/runit, follow the printed instructions after install
 
 # Enable and start
-sudo systemctl daemon-reload
 sudo systemctl enable --now kaidadb
-
-# Check status
-sudo systemctl status kaidadb
-journalctl -u kaidadb -f
 ```
 
 ### Running with Docker
