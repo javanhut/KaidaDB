@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::{Path, Query, Request, State},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, head, put},
+    routing::get,
     Router,
 };
+use percent_encoding::percent_decode_str;
+use tower_http::cors::CorsLayer;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -23,22 +25,28 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/v1/media/{key}", put(put_media))
-        .route("/v1/media/{key}", get(get_media))
-        .route("/v1/media/{key}", head(head_media))
-        .route("/v1/media/{key}", delete(delete_media))
         .route("/v1/media", get(list_media))
-        .route("/v1/meta/{key}", get(get_meta))
         .route("/v1/health", get(health))
+        .fallback(media_fallback)
         .with_state(state)
+        .layer(CorsLayer::permissive())
+}
+
+/// Wildcard captures include a leading `/`; strip it so keys stay consistent.
+fn normalize_key(raw: String) -> String {
+    match raw.strip_prefix('/') {
+        Some(s) => s.to_string(),
+        None => raw,
+    }
 }
 
 async fn put_media(
     State(state): State<AppState>,
-    Path(key): Path<String>,
+    Path(raw_key): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    let key = normalize_key(raw_key);
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -74,9 +82,10 @@ async fn put_media(
 
 async fn get_media(
     State(state): State<AppState>,
-    Path(key): Path<String>,
+    Path(raw_key): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    let key = normalize_key(raw_key);
     let manifest = match state.engine.get_manifest(&key) {
         Ok(Some(m)) => m,
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
@@ -181,8 +190,9 @@ async fn get_media(
 
 async fn head_media(
     State(state): State<AppState>,
-    Path(key): Path<String>,
+    Path(raw_key): Path<String>,
 ) -> impl IntoResponse {
+    let key = normalize_key(raw_key);
     match state.engine.get_manifest(&key) {
         Ok(Some(manifest)) => {
             let mut response = Response::builder()
@@ -206,8 +216,9 @@ async fn head_media(
 
 async fn delete_media(
     State(state): State<AppState>,
-    Path(key): Path<String>,
+    Path(raw_key): Path<String>,
 ) -> impl IntoResponse {
+    let key = normalize_key(raw_key);
     // Invalidate cache
     if let Ok(Some(manifest)) = state.engine.get_manifest(&key) {
         for chunk_id in &manifest.chunks {
@@ -282,8 +293,9 @@ async fn list_media(
 
 async fn get_meta(
     State(state): State<AppState>,
-    Path(key): Path<String>,
+    Path(raw_key): Path<String>,
 ) -> impl IntoResponse {
+    let key = normalize_key(raw_key);
     match state.engine.get_manifest(&key) {
         Ok(Some(manifest)) => {
             let meta = serde_json::json!({
@@ -329,4 +341,40 @@ fn parse_range_header(headers: &HeaderMap, total_size: u64) -> (u64, u64, bool) 
         }
     }
     (0, 0, false)
+}
+
+/// Fallback handler that routes `/v1/media/<key>` requests with slashes in the key
+/// to the appropriate handler. Axum's `{key}` parameter only matches a single path
+/// segment, but KaidaDB keys can contain slashes (e.g. `tv/show/s01/file.mp4`).
+async fn media_fallback(
+    State(state): State<AppState>,
+    req: Request,
+) -> impl IntoResponse {
+    let path = req.uri().path();
+    let headers = req.headers().clone();
+    let method = req.method().clone();
+
+    if let Some(raw_key) = path.strip_prefix("/v1/meta/") {
+        let key = percent_decode_str(raw_key).decode_utf8_lossy().to_string();
+        return get_meta(State(state), Path(key)).await.into_response();
+    }
+
+    let Some(raw_key) = path.strip_prefix("/v1/media/") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let key = percent_decode_str(raw_key).decode_utf8_lossy().to_string();
+
+    match method {
+        Method::GET => get_media(State(state), Path(key), headers).await.into_response(),
+        Method::PUT => {
+            let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+                Ok(b) => b,
+                Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            };
+            put_media(State(state), Path(key), headers, body).await.into_response()
+        }
+        Method::HEAD => head_media(State(state), Path(key)).await.into_response(),
+        Method::DELETE => delete_media(State(state), Path(key)).await.into_response(),
+        _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+    }
 }

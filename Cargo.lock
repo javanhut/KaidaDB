@@ -813,6 +813,7 @@ dependencies = [
  "kaidadb-cache",
  "kaidadb-common",
  "kaidadb-storage",
+ "percent-encoding",
  "prost",
  "prost-types",
  "serde",

@@ -23,5 +23,7 @@ serde_json = { workspace = true }
 tokio-stream = { workspace = true }
 http = { workspace = true }
 
+percent-encoding = "2"
+
 [build-dependencies]
 tonic-build = { workspace = true }
