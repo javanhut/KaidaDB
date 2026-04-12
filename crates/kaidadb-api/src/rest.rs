@@ -116,16 +116,28 @@ async fn get_media(
     let chunk_size = manifest.chunk_size as u64;
     let chunks = manifest.chunks.clone();
 
-    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+    let start_idx = (offset / chunk_size) as usize;
+    let end_idx = if end == 0 {
+        0
+    } else {
+        ((end - 1) / chunk_size) as usize
+    };
+
+    // Pre-warm first chunks into LRU cache to eliminate disk I/O latency
+    // for the critical initial bytes (important when ffmpeg reads the header).
+    let prefetch_end = (end_idx + 1).min(start_idx + 3).min(chunks.len());
+    for idx in start_idx..prefetch_end {
+        let chunk_id = &chunks[idx];
+        if cache.get(chunk_id).is_none() {
+            if let Ok(data) = engine.read_chunk(chunk_id) {
+                cache.insert(chunk_id.clone(), data);
+            }
+        }
+    }
+
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
 
     tokio::spawn(async move {
-        let start_idx = (offset / chunk_size) as usize;
-        let end_idx = if end == 0 {
-            0
-        } else {
-            ((end - 1) / chunk_size) as usize
-        };
-
         for idx in start_idx..=end_idx.min(chunks.len().saturating_sub(1)) {
             let chunk_id = &chunks[idx];
 
@@ -323,17 +335,44 @@ async fn health() -> impl IntoResponse {
 }
 
 fn parse_range_header(headers: &HeaderMap, total_size: u64) -> (u64, u64, bool) {
+    if total_size == 0 {
+        return (0, 0, false);
+    }
     if let Some(range_header) = headers.get(header::RANGE) {
         if let Ok(range_str) = range_header.to_str() {
             if let Some(bytes_range) = range_str.strip_prefix("bytes=") {
+                // Handle suffix range: "bytes=-500" (last 500 bytes)
+                if let Some(suffix) = bytes_range.strip_prefix('-') {
+                    if let Ok(n) = suffix.parse::<u64>() {
+                        if n == 0 {
+                            return (0, 0, false);
+                        }
+                        let start = total_size.saturating_sub(n);
+                        let length = total_size - start;
+                        return (start, length, true);
+                    }
+                    return (0, 0, false);
+                }
                 let parts: Vec<&str> = bytes_range.splitn(2, '-').collect();
                 if parts.len() == 2 {
-                    let start: u64 = parts[0].parse().unwrap_or(0);
+                    let start: u64 = match parts[0].parse() {
+                        Ok(s) => s,
+                        Err(_) => return (0, 0, false),
+                    };
+                    if start >= total_size {
+                        return (0, 0, false);
+                    }
                     let end: u64 = if parts[1].is_empty() {
                         total_size - 1
                     } else {
-                        parts[1].parse().unwrap_or(total_size - 1)
+                        match parts[1].parse::<u64>() {
+                            Ok(e) => e.min(total_size - 1),
+                            Err(_) => total_size - 1,
+                        }
                     };
+                    if end < start {
+                        return (0, 0, false);
+                    }
                     let length = end - start + 1;
                     return (start, length, true);
                 }
