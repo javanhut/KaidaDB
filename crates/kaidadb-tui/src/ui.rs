@@ -879,8 +879,9 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
 // ── Rename Dialog ───────────────────────────────────────────────────
 
 fn draw_rename_dialog(f: &mut Frame, app: &App) {
-    let width = (app.rename_input.len() as u16 + 20).max(50).min(f.area().width - 4);
-    let area = centered_rect(width, 7, f.area());
+    let width = (app.rename_input.len() as u16 + 20).max(55).min(f.area().width - 4);
+    let height = if app.rename_is_dir { 8 } else { 7 };
+    let area = centered_rect(width, height, f.area());
     f.render_widget(Clear, area);
 
     let text = &app.rename_input;
@@ -898,10 +899,12 @@ fn draw_rename_dialog(f: &mut Frame, app: &App) {
         )
     };
 
-    let lines = vec![
+    let label = if app.rename_is_dir { "  New path: " } else { "  New key:  " };
+
+    let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  New key: ", Style::default().fg(Color::Yellow)),
+            Span::styled(label, Style::default().fg(Color::Yellow)),
             Span::styled(before, Style::default().fg(Color::White)),
             Span::styled(
                 cursor_char,
@@ -910,21 +913,40 @@ fn draw_rename_dialog(f: &mut Frame, app: &App) {
             Span::styled(rest, Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
-            Span::styled("  From:    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  From:     ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 &app.rename_original_key,
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
-        Line::from(Span::styled(
-            "  Enter: confirm │ Esc: cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
     ];
+
+    if app.rename_is_dir {
+        let count = app
+            .items
+            .iter()
+            .filter(|i| i.key.starts_with(&format!("{}/", app.rename_original_key)))
+            .count();
+        lines.push(Line::from(Span::styled(
+            format!("  Will rename {count} items under this directory"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "  Enter: confirm │ Esc: cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let title = if app.rename_is_dir {
+        " Rename Directory "
+    } else {
+        " Rename / Move "
+    };
 
     let dialog = Paragraph::new(lines).block(
         Block::default()
-            .title(" Rename / Move ")
+            .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow)),
     );

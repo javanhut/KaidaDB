@@ -96,6 +96,7 @@ pub struct App {
     pub rename_input: String,
     pub rename_cursor: usize,
     pub rename_original_key: String,
+    pub rename_is_dir: bool,
 
     // Mkdir
     pub mkdir_input: String,
@@ -145,6 +146,7 @@ impl App {
             rename_input: String::new(),
             rename_cursor: 0,
             rename_original_key: String::new(),
+            rename_is_dir: false,
             mkdir_input: String::new(),
             mkdir_cursor: 0,
             detail_item: None,
@@ -808,7 +810,13 @@ impl App {
     pub fn enter_rename_mode(&mut self) {
         if let Some(entry) = self.selected_browse_entry() {
             if entry.is_dir {
-                self.status_message = "Cannot rename a directory directly — rename individual files".into();
+                // Directory rename: original key is the full prefix (without trailing slash)
+                let dir_path = format!("{}{}", self.browse_prefix, entry.name);
+                self.rename_original_key = dir_path.clone();
+                self.rename_input = dir_path;
+                self.rename_cursor = self.rename_input.len();
+                self.rename_is_dir = true;
+                self.input_mode = InputMode::RenameInput;
                 return;
             }
         }
@@ -817,6 +825,7 @@ impl App {
             self.rename_original_key = key.clone();
             self.rename_input = key;
             self.rename_cursor = self.rename_input.len();
+            self.rename_is_dir = false;
             self.input_mode = InputMode::RenameInput;
         }
     }
@@ -878,33 +887,84 @@ impl App {
     }
 
     pub async fn execute_rename(&mut self) {
-        let new_key = self.rename_input.trim().to_string();
-        let old_key = self.rename_original_key.clone();
+        let new_path = self.rename_input.trim().to_string();
+        let old_path = self.rename_original_key.clone();
+        let is_dir = self.rename_is_dir;
 
-        if new_key.is_empty() {
+        if new_path.is_empty() {
             self.status_message = "Key cannot be empty".into();
             return;
         }
-        if new_key == old_key {
-            self.status_message = "Key unchanged".into();
+        if new_path == old_path {
+            self.status_message = "Name unchanged".into();
             self.input_mode = InputMode::Normal;
             return;
         }
 
-        if let Some(ref mut client) = self.client {
-            match client
-                .rename_media(client::RenameMediaRequest {
-                    from_key: old_key.clone(),
-                    to_key: new_key.clone(),
-                })
-                .await
-            {
-                Ok(_resp) => {
-                    self.status_message = format!("Renamed '{}' -> '{}'", old_key, new_key);
-                    self.refresh_media_list().await;
+        if is_dir {
+            // Directory rename: find all keys under old_path/ and rename each
+            let old_prefix = format!("{}/", old_path);
+            let new_prefix = format!("{}/", new_path);
+            let keys_to_rename: Vec<String> = self
+                .items
+                .iter()
+                .filter(|i| i.key.starts_with(&old_prefix))
+                .map(|i| i.key.clone())
+                .collect();
+
+            if keys_to_rename.is_empty() {
+                self.status_message = format!("No items found under '{}'", old_prefix);
+                self.input_mode = InputMode::Normal;
+                return;
+            }
+
+            let mut success = 0usize;
+            let mut failed = 0usize;
+
+            if let Some(ref mut client) = self.client {
+                for old_key in &keys_to_rename {
+                    let new_key = format!("{}{}", new_prefix, &old_key[old_prefix.len()..]);
+                    match client
+                        .rename_media(client::RenameMediaRequest {
+                            from_key: old_key.clone(),
+                            to_key: new_key,
+                        })
+                        .await
+                    {
+                        Ok(_) => success += 1,
+                        Err(_) => failed += 1,
+                    }
                 }
-                Err(e) => {
-                    self.status_message = format!("Rename failed: {e}");
+            }
+
+            if failed == 0 {
+                self.status_message = format!(
+                    "Renamed directory '{}' -> '{}' ({} items)",
+                    old_path, new_path, success
+                );
+            } else {
+                self.status_message = format!(
+                    "Renamed {success} items, {failed} failed ('{old_path}' -> '{new_path}')"
+                );
+            }
+            self.refresh_media_list().await;
+        } else {
+            // Single file rename
+            if let Some(ref mut client) = self.client {
+                match client
+                    .rename_media(client::RenameMediaRequest {
+                        from_key: old_path.clone(),
+                        to_key: new_path.clone(),
+                    })
+                    .await
+                {
+                    Ok(_resp) => {
+                        self.status_message = format!("Renamed '{}' -> '{}'", old_path, new_path);
+                        self.refresh_media_list().await;
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Rename failed: {e}");
+                    }
                 }
             }
         }
@@ -912,6 +972,7 @@ impl App {
         self.rename_input.clear();
         self.rename_cursor = 0;
         self.rename_original_key.clear();
+        self.rename_is_dir = false;
         self.input_mode = InputMode::Normal;
     }
 
