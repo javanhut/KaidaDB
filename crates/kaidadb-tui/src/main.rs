@@ -87,6 +87,8 @@ async fn run(
                         KeyCode::Left | KeyCode::Backspace => app.browse_up(),
                         KeyCode::Char('r') => app.refresh_media_list().await,
                         KeyCode::Char('d') => app.enter_delete_confirm(),
+                        KeyCode::Char('m') => app.enter_rename_mode(),
+                        KeyCode::Char('M') => app.enter_mkdir_mode(),
                         KeyCode::Char('s') => app.enter_store_mode(),
                         KeyCode::Char('/') => app.enter_search_mode(),
                         KeyCode::Char('n') => app.search_next(),
@@ -204,6 +206,41 @@ async fn run(
                         }
                         _ => {}
                     },
+                    InputMode::RenameInput => match key.code {
+                        KeyCode::Enter => {
+                            app.execute_rename().await;
+                        }
+                        KeyCode::Esc => {
+                            app.rename_input.clear();
+                            app.rename_cursor = 0;
+                            app.rename_original_key.clear();
+                            app.input_mode = InputMode::Normal;
+                        }
+                        KeyCode::Left => app.rename_move_left(),
+                        KeyCode::Right => app.rename_move_right(),
+                        KeyCode::Home => app.rename_home(),
+                        KeyCode::End => app.rename_end(),
+                        KeyCode::Backspace => app.rename_backspace(),
+                        KeyCode::Delete => app.rename_delete(),
+                        KeyCode::Char(c) => app.rename_insert_char(c),
+                        _ => {}
+                    },
+                    InputMode::MkdirInput => match key.code {
+                        KeyCode::Enter => {
+                            app.execute_mkdir().await;
+                        }
+                        KeyCode::Esc => {
+                            app.mkdir_input.clear();
+                            app.mkdir_cursor = 0;
+                            app.input_mode = InputMode::Normal;
+                        }
+                        KeyCode::Left => app.mkdir_move_left(),
+                        KeyCode::Right => app.mkdir_move_right(),
+                        KeyCode::Backspace => app.mkdir_backspace(),
+                        KeyCode::Delete => app.mkdir_delete(),
+                        KeyCode::Char(c) => app.mkdir_insert_char(c),
+                        _ => {}
+                    },
                     InputMode::DeleteConfirm => match key.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
                             app.execute_delete().await;
@@ -218,6 +255,7 @@ async fn run(
                             app.input_mode = InputMode::Normal;
                         }
                         KeyCode::Char('d') => app.enter_delete_confirm(),
+                        KeyCode::Char('m') => app.enter_rename_mode(),
                         _ => {}
                     },
                 }

@@ -26,6 +26,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/media", get(list_media))
+        .route("/v1/media/rename", axum::routing::post(rename_media))
         .route("/v1/health", get(health))
         .fallback(media_fallback)
         .with_state(state)
@@ -324,6 +325,35 @@ async fn get_meta(
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RenameRequest {
+    from_key: String,
+    to_key: String,
+}
+
+async fn rename_media(
+    State(state): State<AppState>,
+    axum::Json(body): axum::Json<RenameRequest>,
+) -> impl IntoResponse {
+    match state.engine.rename(&body.from_key, &body.to_key) {
+        Ok(manifest) => {
+            let resp = serde_json::json!({
+                "key": manifest.key,
+                "total_size": manifest.total_size,
+                "content_type": manifest.content_type,
+            });
+            axum::Json(resp).into_response()
+        }
+        Err(kaidadb_common::KaidaDbError::NotFound(_)) => {
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Err(kaidadb_common::KaidaDbError::AlreadyExists(msg)) => {
+            (StatusCode::CONFLICT, msg).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
 

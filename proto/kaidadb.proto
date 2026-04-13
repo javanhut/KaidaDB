@@ -18,6 +18,9 @@ service KaidaDB {
     // List media keys
     rpc ListMedia(ListMediaRequest) returns (ListMediaResponse);
 
+    // Rename (move) media to a new key
+    rpc RenameMedia(RenameMediaRequest) returns (RenameMediaResponse);
+
     // Health check
     rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 }
@@ -87,6 +90,17 @@ message ListMediaRequest {
 message ListMediaResponse {
     repeated MediaMetadata items = 1;
     string next_cursor = 2;
+}
+
+message RenameMediaRequest {
+    string from_key = 1;
+    string to_key = 2;
+}
+
+message RenameMediaResponse {
+    string key = 1;
+    uint64 total_size = 2;
+    string content_type = 3;
 }
 
 message HealthCheckRequest {}

@@ -205,6 +205,37 @@ impl KaidaDb for KaidaDbGrpc {
         Ok(Response::new(DeleteMediaResponse { deleted }))
     }
 
+    async fn rename_media(
+        &self,
+        request: Request<RenameMediaRequest>,
+    ) -> Result<Response<RenameMediaResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.from_key.is_empty() || req.to_key.is_empty() {
+            return Err(Status::invalid_argument("from_key and to_key are required"));
+        }
+
+        let manifest = self
+            .engine
+            .rename(&req.from_key, &req.to_key)
+            .map_err(|e| match e {
+                kaidadb_common::KaidaDbError::NotFound(_) => Status::not_found(e.to_string()),
+                kaidadb_common::KaidaDbError::AlreadyExists(_) => {
+                    Status::already_exists(e.to_string())
+                }
+                kaidadb_common::KaidaDbError::InvalidKey(_) => {
+                    Status::invalid_argument(e.to_string())
+                }
+                _ => Status::internal(e.to_string()),
+            })?;
+
+        Ok(Response::new(RenameMediaResponse {
+            key: manifest.key,
+            total_size: manifest.total_size,
+            content_type: manifest.content_type,
+        }))
+    }
+
     async fn list_media(
         &self,
         request: Request<ListMediaRequest>,

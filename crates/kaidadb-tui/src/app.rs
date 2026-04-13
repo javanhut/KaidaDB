@@ -13,6 +13,8 @@ pub enum InputMode {
     FileBrowser,
     DeleteConfirm,
     Detail,
+    RenameInput,
+    MkdirInput,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +92,15 @@ pub struct App {
     pub browser_selected: usize,
     pub browser_scroll_offset: usize,
 
+    // Rename/move
+    pub rename_input: String,
+    pub rename_cursor: usize,
+    pub rename_original_key: String,
+
+    // Mkdir
+    pub mkdir_input: String,
+    pub mkdir_cursor: usize,
+
     // Detail view
     pub detail_item: Option<MediaMetadata>,
 
@@ -131,6 +142,11 @@ impl App {
             browser_entries: Vec::new(),
             browser_selected: 0,
             browser_scroll_offset: 0,
+            rename_input: String::new(),
+            rename_cursor: 0,
+            rename_original_key: String::new(),
+            mkdir_input: String::new(),
+            mkdir_cursor: 0,
             detail_item: None,
             health_status: "unknown".into(),
             server_version: String::new(),
@@ -227,7 +243,7 @@ impl App {
             }
             if let Some(slash_pos) = suffix.find('/') {
                 dirs.insert(suffix[..slash_pos].to_string());
-            } else {
+            } else if suffix != ".kaidadb_dir" {
                 files.push(BrowseEntry {
                     name: suffix.to_string(),
                     is_dir: false,
@@ -786,6 +802,213 @@ impl App {
             self.input_mode = InputMode::DeleteConfirm;
         }
     }
+
+    // --- Rename / Move ---
+
+    pub fn enter_rename_mode(&mut self) {
+        if let Some(entry) = self.selected_browse_entry() {
+            if entry.is_dir {
+                self.status_message = "Cannot rename a directory directly — rename individual files".into();
+                return;
+            }
+        }
+        let key = self.selected_item().map(|i| i.key.clone());
+        if let Some(key) = key {
+            self.rename_original_key = key.clone();
+            self.rename_input = key;
+            self.rename_cursor = self.rename_input.len();
+            self.input_mode = InputMode::RenameInput;
+        }
+    }
+
+    pub fn rename_insert_char(&mut self, c: char) {
+        self.rename_input.insert(self.rename_cursor, c);
+        self.rename_cursor += c.len_utf8();
+    }
+
+    pub fn rename_backspace(&mut self) {
+        if self.rename_cursor > 0 {
+            let prev = self.rename_input[..self.rename_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.rename_input.drain(prev..self.rename_cursor);
+            self.rename_cursor = prev;
+        }
+    }
+
+    pub fn rename_delete(&mut self) {
+        if self.rename_cursor < self.rename_input.len() {
+            let next = self.rename_input[self.rename_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.rename_cursor + i)
+                .unwrap_or(self.rename_input.len());
+            self.rename_input.drain(self.rename_cursor..next);
+        }
+    }
+
+    pub fn rename_move_left(&mut self) {
+        if self.rename_cursor > 0 {
+            self.rename_cursor = self.rename_input[..self.rename_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+    }
+
+    pub fn rename_move_right(&mut self) {
+        if self.rename_cursor < self.rename_input.len() {
+            self.rename_cursor = self.rename_input[self.rename_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.rename_cursor + i)
+                .unwrap_or(self.rename_input.len());
+        }
+    }
+
+    pub fn rename_home(&mut self) {
+        self.rename_cursor = 0;
+    }
+
+    pub fn rename_end(&mut self) {
+        self.rename_cursor = self.rename_input.len();
+    }
+
+    pub async fn execute_rename(&mut self) {
+        let new_key = self.rename_input.trim().to_string();
+        let old_key = self.rename_original_key.clone();
+
+        if new_key.is_empty() {
+            self.status_message = "Key cannot be empty".into();
+            return;
+        }
+        if new_key == old_key {
+            self.status_message = "Key unchanged".into();
+            self.input_mode = InputMode::Normal;
+            return;
+        }
+
+        if let Some(ref mut client) = self.client {
+            match client
+                .rename_media(client::RenameMediaRequest {
+                    from_key: old_key.clone(),
+                    to_key: new_key.clone(),
+                })
+                .await
+            {
+                Ok(_resp) => {
+                    self.status_message = format!("Renamed '{}' -> '{}'", old_key, new_key);
+                    self.refresh_media_list().await;
+                }
+                Err(e) => {
+                    self.status_message = format!("Rename failed: {e}");
+                }
+            }
+        }
+
+        self.rename_input.clear();
+        self.rename_cursor = 0;
+        self.rename_original_key.clear();
+        self.input_mode = InputMode::Normal;
+    }
+
+    // --- Mkdir ---
+
+    pub fn enter_mkdir_mode(&mut self) {
+        self.mkdir_input.clear();
+        self.mkdir_cursor = 0;
+        self.input_mode = InputMode::MkdirInput;
+    }
+
+    pub fn mkdir_insert_char(&mut self, c: char) {
+        self.mkdir_input.insert(self.mkdir_cursor, c);
+        self.mkdir_cursor += c.len_utf8();
+    }
+
+    pub fn mkdir_backspace(&mut self) {
+        if self.mkdir_cursor > 0 {
+            let prev = self.mkdir_input[..self.mkdir_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.mkdir_input.drain(prev..self.mkdir_cursor);
+            self.mkdir_cursor = prev;
+        }
+    }
+
+    pub fn mkdir_delete(&mut self) {
+        if self.mkdir_cursor < self.mkdir_input.len() {
+            let next = self.mkdir_input[self.mkdir_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.mkdir_cursor + i)
+                .unwrap_or(self.mkdir_input.len());
+            self.mkdir_input.drain(self.mkdir_cursor..next);
+        }
+    }
+
+    pub fn mkdir_move_left(&mut self) {
+        if self.mkdir_cursor > 0 {
+            self.mkdir_cursor = self.mkdir_input[..self.mkdir_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+    }
+
+    pub fn mkdir_move_right(&mut self) {
+        if self.mkdir_cursor < self.mkdir_input.len() {
+            self.mkdir_cursor = self.mkdir_input[self.mkdir_cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.mkdir_cursor + i)
+                .unwrap_or(self.mkdir_input.len());
+        }
+    }
+
+    pub async fn execute_mkdir(&mut self) {
+        let dir_name = self.mkdir_input.trim().to_string();
+        if dir_name.is_empty() {
+            self.input_mode = InputMode::Normal;
+            return;
+        }
+
+        // Store a zero-byte marker to make the directory persist
+        let marker_key = format!("{}{}/{}", self.browse_prefix, dir_name, ".kaidadb_dir");
+
+        if let Some(ref mut client) = self.client {
+            let header = client::StoreMediaRequest {
+                request: Some(client::store_media_request::Request::Header(
+                    client::StoreMediaHeader {
+                        key: marker_key.clone(),
+                        content_type: "application/x-directory".into(),
+                        metadata: Default::default(),
+                    },
+                )),
+            };
+
+            match client.store_media(tokio_stream::iter(vec![header])).await {
+                Ok(_) => {
+                    self.status_message = format!("Created directory '{}{}'", self.browse_prefix, dir_name);
+                    self.refresh_media_list().await;
+                }
+                Err(e) => {
+                    self.status_message = format!("Mkdir failed: {e}");
+                }
+            }
+        }
+
+        self.mkdir_input.clear();
+        self.mkdir_cursor = 0;
+        self.input_mode = InputMode::Normal;
+    }
+
+    // --- Delete ---
 
     pub async fn execute_delete(&mut self) {
         let key = match self.selected_item() {

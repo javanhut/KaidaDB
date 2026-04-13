@@ -17,6 +17,14 @@ pub fn draw(f: &mut Frame, app: &App) {
             draw_main_layout(f, app);
             draw_delete_confirm(f, app);
         }
+        InputMode::RenameInput => {
+            draw_main_layout(f, app);
+            draw_rename_dialog(f, app);
+        }
+        InputMode::MkdirInput => {
+            draw_main_layout(f, app);
+            draw_mkdir_dialog(f, app);
+        }
         InputMode::Search => {
             draw_main_layout(f, app);
             draw_search_bar(f, app);
@@ -253,12 +261,12 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let keybinds = match app.input_mode {
         InputMode::Normal => {
             if app.browse_prefix.is_empty() {
-                " q Quit │ j/k Navigate │ Enter Open │ s Store │ d Delete │ / Search │ r Refresh "
+                " q Quit │ j/k Nav │ Enter Open │ s Store │ d Del │ m Rename │ M Mkdir │ / Search │ r Refresh "
             } else {
-                " q/Bksp Back │ j/k Navigate │ Enter Open │ s Store │ d Delete │ / Search │ r Refresh "
+                " q/Bksp Back │ j/k Nav │ Enter Open │ s Store │ d Del │ m Rename │ M Mkdir │ / Search "
             }
         }
-        InputMode::Detail => " Esc Back │ d Delete ",
+        InputMode::Detail => " Esc Back │ d Delete │ m Rename ",
         _ => "",
     };
 
@@ -866,6 +874,119 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
     ];
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+// ── Rename Dialog ───────────────────────────────────────────────────
+
+fn draw_rename_dialog(f: &mut Frame, app: &App) {
+    let width = (app.rename_input.len() as u16 + 20).max(50).min(f.area().width - 4);
+    let area = centered_rect(width, 7, f.area());
+    f.render_widget(Clear, area);
+
+    let text = &app.rename_input;
+    let cursor_pos = app.rename_cursor;
+    let (before, after) = text.split_at(cursor_pos.min(text.len()));
+    let (cursor_char, rest) = if after.is_empty() {
+        (" ", "")
+    } else {
+        after.split_at(
+            after
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| i)
+                .unwrap_or(after.len()),
+        )
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  New key: ", Style::default().fg(Color::Yellow)),
+            Span::styled(before, Style::default().fg(Color::White)),
+            Span::styled(
+                cursor_char,
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            ),
+            Span::styled(rest, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("  From:    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                &app.rename_original_key,
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "  Enter: confirm │ Esc: cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let dialog = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Rename / Move ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    f.render_widget(dialog, area);
+}
+
+// ── Mkdir Dialog ────────────────────────────────────────────────────
+
+fn draw_mkdir_dialog(f: &mut Frame, app: &App) {
+    let width = 50u16.min(f.area().width.saturating_sub(4));
+    let area = centered_rect(width, 7, f.area());
+    f.render_widget(Clear, area);
+
+    let text = &app.mkdir_input;
+    let cursor_pos = app.mkdir_cursor;
+    let (before, after) = text.split_at(cursor_pos.min(text.len()));
+    let (cursor_char, rest) = if after.is_empty() {
+        (" ", "")
+    } else {
+        after.split_at(
+            after
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| i)
+                .unwrap_or(after.len()),
+        )
+    };
+
+    let parent = if app.browse_prefix.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", app.browse_prefix)
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Name: ", Style::default().fg(Color::Cyan)),
+            Span::styled(before, Style::default().fg(Color::White)),
+            Span::styled(
+                cursor_char,
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            ),
+            Span::styled(rest, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("  In:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&parent, Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(Span::styled(
+            "  Enter: create │ Esc: cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let dialog = Paragraph::new(lines).block(
+        Block::default()
+            .title(" New Directory ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(dialog, area);
 }
 
 // ── Search Bar ───────────────────────────────────────────────────────

@@ -278,6 +278,43 @@ impl StorageEngine {
         Ok(true)
     }
 
+    /// Rename (move) media from one key to another.
+    /// This only updates the manifest key — chunks are untouched.
+    pub fn rename(&self, from_key: &str, to_key: &str) -> Result<MediaManifest> {
+        if to_key.is_empty() {
+            return Err(KaidaDbError::InvalidKey("key cannot be empty".into()));
+        }
+        if from_key == to_key {
+            return Err(KaidaDbError::InvalidKey("source and destination keys are the same".into()));
+        }
+
+        let manifest = self
+            .index
+            .get_manifest(from_key)?
+            .ok_or_else(|| KaidaDbError::NotFound(from_key.to_string()))?;
+
+        if self.index.get_manifest(to_key)?.is_some() {
+            return Err(KaidaDbError::AlreadyExists(to_key.to_string()));
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let new_manifest = MediaManifest {
+            key: to_key.to_string(),
+            updated_at: now,
+            ..manifest
+        };
+
+        self.index.put_manifest(&new_manifest)?;
+        self.index.delete_manifest(from_key)?;
+
+        tracing::info!(from = from_key, to = to_key, "renamed media");
+        Ok(new_manifest)
+    }
+
     /// List media keys with pagination.
     pub fn list(
         &self,
