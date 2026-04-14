@@ -43,14 +43,69 @@ When the server starts, it:
    - **Port 50051** — gRPC (used by the CLI and TUI)
    - **Port 8080** — REST API (used by web apps, curl, media players)
 
-You'll see output like:
+On first start, KaidaDB generates a **server password** and prints it:
 
 ```
-INFO kaidadb: starting KaidaDB server config=KaidaDbConfig { ... }
+INFO kaidadb: ========================================
+INFO kaidadb:   Generated new server key: aB3xK9mP...
+INFO kaidadb:   Save this key for remote CLI/TUI access.
+INFO kaidadb:   To regenerate: kaidadb-server --regenerate-key
+INFO kaidadb: ========================================
 INFO kaidadb: server listening grpc_addr=0.0.0.0:50051 rest_addr=0.0.0.0:8080
 ```
 
+**Save this password.** You'll need it to connect from other machines. It's only displayed once in the server output — after that, only the SHA-256 hash is stored on disk at `{data_dir}/.server_key`. The plaintext cannot be recovered from that file.
+
+If you lose it, regenerate a new one:
+
+```bash
+kaidadb-server --regenerate-key
+# Prints: New server key: xY7pQ2wR...
+```
+
+The new key replaces the old one — any clients using the old password will need to be updated.
+
 Press `Ctrl-C` to shut down gracefully.
+
+## Server Password (Remote Access Security)
+
+KaidaDB auto-generates a unique password for each server instance. This password protects remote access while keeping local usage frictionless:
+
+- **Local access** (localhost / 127.0.0.1) — works without any password
+- **Remote access** — every request must include the password or it's rejected
+
+This applies to **all APIs** — gRPC and REST, every endpoint, no exceptions.
+
+### Using the Password
+
+**CLI (remote):**
+
+```bash
+kaidadb-cli --addr http://my-server:50051 --server-pass aB3xK9mP... list
+```
+
+**TUI (remote):**
+
+```bash
+kaidadb-tui --addr http://my-server:50051 --server-pass aB3xK9mP...
+```
+
+**REST (remote):**
+
+```bash
+curl -H "X-Server-Pass: aB3xK9mP..." http://my-server:8080/v1/health
+```
+
+Without the password, remote connections get a `401 Unauthorized` (REST) or `UNAUTHENTICATED` (gRPC) error.
+
+### How It Works Under the Hood
+
+1. On first server start, a random 32-character alphanumeric password is generated
+2. The SHA-256 hash of the password is stored in `{data_dir}/.server_key`
+3. The plaintext password is printed to the console once, then never stored
+4. On each request, the server checks the peer address — if it's loopback (127.0.0.1 / ::1), the request passes through without auth
+5. For remote connections, the server hashes the provided password and compares it to the stored hash
+6. Mismatch or missing password = request rejected
 
 ## Storing Your First File
 
@@ -328,11 +383,13 @@ You can install just the CLI on any machine to manage a remote KaidaDB server:
 # Install CLI only (no server, no config generation)
 ./install.sh --cli-only --no-config
 
-# Point to your remote server
-kaidadb-cli --addr http://your-server:50051 health
-kaidadb-cli --addr http://your-server:50051 list
-kaidadb-cli --addr http://your-server:50051 store my-video ./video.mp4
+# Point to your remote server (password required)
+kaidadb-cli --addr http://your-server:50051 --server-pass <password> health
+kaidadb-cli --addr http://your-server:50051 --server-pass <password> list
+kaidadb-cli --addr http://your-server:50051 --server-pass <password> store my-video ./video.mp4
 ```
+
+The `--server-pass` is the password that was generated when the server first started. Without it, remote connections are rejected.
 
 ## Using with Reelscape
 

@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, Query, Request, State},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{header, HeaderMap, Method, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -16,6 +17,7 @@ use tokio::sync::mpsc;
 
 use kaidadb_cache::ChunkCache;
 use kaidadb_common::config::StreamingConfig;
+use kaidadb_common::server_key;
 use kaidadb_storage::StorageEngine;
 
 use crate::streaming;
@@ -25,6 +27,7 @@ pub struct AppState {
     pub engine: Arc<StorageEngine>,
     pub cache: Arc<ChunkCache>,
     pub streaming: StreamingConfig,
+    pub server_key_hash: Arc<String>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -34,8 +37,46 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/streams", get(list_streams))
         .route("/v1/health", get(health))
         .fallback(combined_fallback)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .with_state(state)
         .layer(CorsLayer::permissive())
+}
+
+async fn auth_middleware(
+    State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<std::net::SocketAddr>>,
+    req: Request,
+    next: Next,
+) -> impl IntoResponse {
+    // Allow local connections without auth
+    if let Some(ConnectInfo(addr)) = connect_info {
+        if addr.ip().is_loopback() {
+            return next.run(req).await.into_response();
+        }
+    } else {
+        // No connect info available — treat as local
+        return next.run(req).await.into_response();
+    }
+
+    // Remote connection: require server password
+    match req.headers().get("x-server-pass") {
+        Some(value) => {
+            if let Ok(provided) = value.to_str() {
+                if server_key::verify_key(provided, &state.server_key_hash) {
+                    return next.run(req).await.into_response();
+                }
+            }
+            (StatusCode::UNAUTHORIZED, "invalid server password").into_response()
+        }
+        None => (
+            StatusCode::UNAUTHORIZED,
+            "server password required for remote access (use X-Server-Pass header)",
+        )
+            .into_response(),
+    }
 }
 
 /// Wildcard captures include a leading `/`; strip it so keys stay consistent.

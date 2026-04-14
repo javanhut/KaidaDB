@@ -6,6 +6,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use kaidadb_cache::ChunkCache;
 use kaidadb_common::config::StreamingConfig;
+use kaidadb_common::server_key;
 use kaidadb_storage::StorageEngine;
 
 use crate::proto::kaida_db_server::KaidaDb;
@@ -16,6 +17,7 @@ pub struct KaidaDbGrpc {
     engine: Arc<StorageEngine>,
     cache: Arc<ChunkCache>,
     streaming: StreamingConfig,
+    server_key_hash: Arc<String>,
 }
 
 impl KaidaDbGrpc {
@@ -23,11 +25,42 @@ impl KaidaDbGrpc {
         engine: Arc<StorageEngine>,
         cache: Arc<ChunkCache>,
         streaming: StreamingConfig,
+        server_key_hash: Arc<String>,
     ) -> Self {
         Self {
             engine,
             cache,
             streaming,
+            server_key_hash,
+        }
+    }
+
+    fn check_auth<T>(&self, req: &Request<T>) -> Result<(), Status> {
+        // Allow local connections without auth
+        if let Some(addr) = req.remote_addr() {
+            if addr.ip().is_loopback() {
+                return Ok(());
+            }
+        } else {
+            // No remote addr available (e.g., UDS) — treat as local
+            return Ok(());
+        }
+
+        // Remote connection: require server password
+        match req.metadata().get("x-server-pass") {
+            Some(value) => {
+                let provided = value.to_str().map_err(|_| {
+                    Status::unauthenticated("invalid server password encoding")
+                })?;
+                if server_key::verify_key(provided, &self.server_key_hash) {
+                    Ok(())
+                } else {
+                    Err(Status::unauthenticated("invalid server password"))
+                }
+            }
+            None => Err(Status::unauthenticated(
+                "server password required for remote access (use --server-pass)",
+            )),
         }
     }
 }
@@ -38,6 +71,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<Streaming<StoreMediaRequest>>,
     ) -> Result<Response<StoreMediaResponse>, Status> {
+        self.check_auth(&request)?;
         let mut stream = request.into_inner();
 
         let mut key = String::new();
@@ -87,6 +121,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<StreamMediaRequest>,
     ) -> Result<Response<Self::StreamMediaStream>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
 
         let manifest = self
@@ -185,6 +220,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<GetMediaMetaRequest>,
     ) -> Result<Response<MediaMetadata>, Status> {
+        self.check_auth(&request)?;
         let key = &request.into_inner().key;
         let manifest = self
             .engine
@@ -199,6 +235,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<DeleteMediaRequest>,
     ) -> Result<Response<DeleteMediaResponse>, Status> {
+        self.check_auth(&request)?;
         let key = &request.into_inner().key;
 
         // Invalidate cached chunks
@@ -220,6 +257,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<RenameMediaRequest>,
     ) -> Result<Response<RenameMediaResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
 
         if req.from_key.is_empty() || req.to_key.is_empty() {
@@ -251,6 +289,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<ListMediaRequest>,
     ) -> Result<Response<ListMediaResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
@@ -267,8 +306,9 @@ impl KaidaDb for KaidaDbGrpc {
 
     async fn health_check(
         &self,
-        _request: Request<HealthCheckRequest>,
+        request: Request<HealthCheckRequest>,
     ) -> Result<Response<HealthCheckResponse>, Status> {
+        self.check_auth(&request)?;
         Ok(Response::new(HealthCheckResponse {
             status: "ok".into(),
             version: env!("CARGO_PKG_VERSION").into(),
@@ -280,6 +320,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<GetPlaylistRequest>,
     ) -> Result<Response<PlaylistResponse>, Status> {
+        self.check_auth(&request)?;
         let stream_id = &request.into_inner().stream_id;
         let variants = streaming::discover_variants(&self.engine, &self.streaming, stream_id)
             .map_err(|e| Status::internal(e))?;
@@ -299,6 +340,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<GetVariantPlaylistRequest>,
     ) -> Result<Response<PlaylistResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
         let init_key = format!(
             "{}{}variants/{}/init.mp4",
@@ -329,6 +371,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<GetPlaylistRequest>,
     ) -> Result<Response<PlaylistResponse>, Status> {
+        self.check_auth(&request)?;
         let stream_id = &request.into_inner().stream_id;
         let variants = streaming::discover_variants(&self.engine, &self.streaming, stream_id)
             .map_err(|e| Status::internal(e))?;
@@ -361,6 +404,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<ListStreamsRequest>,
     ) -> Result<Response<ListStreamsResponse>, Status> {
+        self.check_auth(&request)?;
         let req = request.into_inner();
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
 
@@ -387,6 +431,7 @@ impl KaidaDb for KaidaDbGrpc {
         &self,
         request: Request<DeleteStreamRequest>,
     ) -> Result<Response<DeleteStreamResponse>, Status> {
+        self.check_auth(&request)?;
         let stream_id = &request.into_inner().stream_id;
 
         // Invalidate cache

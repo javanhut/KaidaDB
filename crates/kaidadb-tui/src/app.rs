@@ -1,7 +1,6 @@
-use crate::client::{self, KaidaDbClient, MediaMetadata};
+use crate::client::{self, AuthClient, MediaMetadata};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use tonic::transport::Channel;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputMode {
@@ -51,7 +50,8 @@ pub struct BrowseEntry {
 
 pub struct App {
     pub addr: String,
-    pub client: Option<KaidaDbClient<Channel>>,
+    pub server_pass: Option<String>,
+    pub client: Option<AuthClient>,
     pub connected: bool,
 
     // Media list
@@ -119,13 +119,14 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(addr: String) -> Self {
+    pub fn new(addr: String, server_pass: Option<String>) -> Self {
         let home = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/"));
 
         Self {
             addr,
+            server_pass,
             client: None,
             connected: false,
             items: Vec::new(),
@@ -169,7 +170,7 @@ impl App {
     }
 
     pub async fn connect(&mut self) {
-        match client::connect(&self.addr).await {
+        match client::connect(&self.addr, self.server_pass.clone()).await {
             Ok(c) => {
                 self.client = Some(c);
                 self.connected = true;

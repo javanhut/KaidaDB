@@ -873,8 +873,10 @@ dependencies = [
  "bytes",
  "figment",
  "hex",
+ "rand",
  "serde",
  "sha2",
+ "tempfile",
  "thiserror",
  "tracing",
 ]

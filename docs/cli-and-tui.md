@@ -7,10 +7,12 @@ The CLI communicates with the KaidaDB server over gRPC. It's the fastest way to 
 ### Usage
 
 ```
-kaidadb-cli [--addr <GRPC_ADDRESS>] <COMMAND>
+kaidadb-cli [--addr <GRPC_ADDRESS>] [--server-pass <PASSWORD>] <COMMAND>
 ```
 
 Default address: `http://localhost:50051`
+
+The `--server-pass` flag is required when connecting to a remote server. Local connections (localhost) work without it. The password is auto-generated on first server start — see [Getting Started](./getting-started.md#server-password-remote-access-security).
 
 ### Commands
 
@@ -146,12 +148,14 @@ Version: 0.1.0
 
 ### Remote Server Access
 
-Point the CLI at any reachable KaidaDB server:
+Point the CLI at any reachable KaidaDB server. You must include the server password:
 
 ```bash
-kaidadb-cli --addr http://192.168.1.50:50051 list
-kaidadb-cli --addr http://my-server.local:50051 store backup/photos ./photos.tar
+kaidadb-cli --addr http://192.168.1.50:50051 --server-pass <password> list
+kaidadb-cli --addr http://my-server.local:50051 --server-pass <password> store backup/photos ./photos.tar
 ```
+
+Without `--server-pass`, remote connections are rejected with an `UNAUTHENTICATED` error.
 
 ---
 
@@ -203,14 +207,14 @@ The terminal user interface provides a visual way to browse, search, upload, and
 ### Launch
 
 ```bash
-# Default server (localhost:50051)
+# Default server (localhost:50051) — no password needed locally
 kaidadb-tui
 
 # During development
 cargo run -p kaidadb-tui
 
-# Custom server address
-kaidadb-tui --addr http://your-server:50051
+# Remote server (password required)
+kaidadb-tui --addr http://your-server:50051 --server-pass <password>
 ```
 
 ### Interface Layout

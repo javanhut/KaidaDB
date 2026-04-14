@@ -1,5 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tonic::service::interceptor::InterceptedService;
+use tonic::transport::Channel;
 
 pub mod proto {
     tonic::include_proto!("kaidadb");
@@ -8,12 +10,19 @@ pub mod proto {
 use proto::kaida_db_client::KaidaDbClient;
 use proto::*;
 
+type AuthInterceptor = Box<dyn FnMut(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Send>;
+type AuthClient = KaidaDbClient<InterceptedService<Channel, AuthInterceptor>>;
+
 #[derive(Parser)]
 #[command(name = "kaidadb-cli", version, about = "KaidaDB CLI client")]
 struct Cli {
     /// Server gRPC address
     #[arg(short, long, default_value = "http://localhost:50051")]
     addr: String,
+
+    /// Server password for remote access
+    #[arg(long)]
+    server_pass: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -67,7 +76,23 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-    let mut client = KaidaDbClient::connect(cli.addr).await?;
+
+    let channel = Channel::from_shared(cli.addr)?.connect().await?;
+    let interceptor: AuthInterceptor = if let Some(ref pass) = cli.server_pass {
+        let pass = pass.clone();
+        Box::new(move |mut req: tonic::Request<()>| {
+            req.metadata_mut().insert(
+                "x-server-pass",
+                pass.parse().map_err(|_| {
+                    tonic::Status::invalid_argument("invalid server password characters")
+                })?,
+            );
+            Ok(req)
+        })
+    } else {
+        Box::new(|req: tonic::Request<()>| Ok(req))
+    };
+    let mut client: AuthClient = KaidaDbClient::with_interceptor(channel, interceptor);
 
     match cli.command {
         Commands::Store {

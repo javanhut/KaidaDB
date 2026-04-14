@@ -10,7 +10,7 @@ use kaidadb_api::grpc::KaidaDbGrpc;
 use kaidadb_api::proto::kaida_db_server::KaidaDbServer;
 use kaidadb_api::rest;
 use kaidadb_cache::ChunkCache;
-use kaidadb_common::KaidaDbConfig;
+use kaidadb_common::{server_key, KaidaDbConfig};
 use kaidadb_storage::StorageEngine;
 
 #[derive(Parser)]
@@ -19,6 +19,10 @@ struct Args {
     /// Path to config file
     #[arg(short, long)]
     config: Option<String>,
+
+    /// Regenerate the server access key and exit
+    #[arg(long)]
+    regenerate_key: bool,
 }
 
 #[tokio::main]
@@ -33,7 +37,26 @@ async fn main() -> anyhow::Result<()> {
     let config = KaidaDbConfig::load(args.config.as_deref())?;
     config.validate()?;
 
+    // Handle --regenerate-key
+    if args.regenerate_key {
+        let plaintext = server_key::regenerate_key(&config.data_dir)?;
+        println!("New server key: {plaintext}");
+        println!("Save this key — you'll need it for remote CLI/TUI access.");
+        return Ok(());
+    }
+
     tracing::info!(?config, "starting KaidaDB server");
+
+    // Load or generate server key
+    let (key_hash, plaintext) = server_key::load_or_create_key(&config.data_dir)?;
+    if let Some(pt) = plaintext {
+        tracing::info!("========================================");
+        tracing::info!("  Generated new server key: {}", pt);
+        tracing::info!("  Save this key for remote CLI/TUI access.");
+        tracing::info!("  To regenerate: kaidadb-server --regenerate-key");
+        tracing::info!("========================================");
+    }
+    let key_hash = Arc::new(key_hash);
 
     // Initialize storage engine
     let engine = Arc::new(StorageEngine::open(&config.data_dir, config.storage.chunk_size)?);
@@ -43,7 +66,12 @@ async fn main() -> anyhow::Result<()> {
 
     // gRPC server
     let grpc_addr = config.grpc_addr.parse()?;
-    let grpc_service = KaidaDbGrpc::new(engine.clone(), cache.clone(), config.streaming.clone());
+    let grpc_service = KaidaDbGrpc::new(
+        engine.clone(),
+        cache.clone(),
+        config.streaming.clone(),
+        key_hash.clone(),
+    );
 
     let grpc_server = TonicServer::builder()
         .add_service(KaidaDbServer::new(grpc_service))
@@ -54,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         engine: engine.clone(),
         cache: cache.clone(),
         streaming: config.streaming.clone(),
+        server_key_hash: key_hash,
     };
     let rest_app = rest::router(rest_state);
     let rest_addr: std::net::SocketAddr = config.rest_addr.parse()?;
@@ -68,7 +97,10 @@ async fn main() -> anyhow::Result<()> {
                 tracing::error!(%e, "gRPC server error");
             }
         }
-        result = axum::serve(rest_listener, rest_app).into_future() => {
+        result = axum::serve(
+            rest_listener,
+            rest_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        ).into_future() => {
             if let Err(e) = result {
                 tracing::error!(%e, "REST server error");
             }

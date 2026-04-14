@@ -8,6 +8,7 @@ A self-hosted media database built in Rust. Store and stream video, audio, image
 - **Range requests** — seek to any byte offset with O(1) chunk lookup
 - **LRU caching** — size-bounded chunk cache keeps hot media in memory
 - **Dual API** — gRPC for performance, REST with Range header support for compatibility
+- **Remote access security** — auto-generated server password protects remote access, local access stays frictionless
 - **Zero external dependencies** — no cloud services, no external databases, one binary
 
 ## Installation

@@ -102,6 +102,61 @@ docker run -d \
   kaidadb
 ```
 
+## Server Password
+
+KaidaDB auto-generates a unique password for each server instance to protect remote access. This is not a config file option — it's managed separately.
+
+### Where to Find the Password
+
+The password is **printed to the server log output on first start only**. Look for the line:
+
+```
+INFO kaidadb:   Generated new server key: aB3xK9mP...
+```
+
+If you started KaidaDB as a service, check the logs:
+
+```bash
+# systemd
+journalctl --user -u kaidadb | grep "server key"
+
+# kaidadb-ctl
+grep "server key" ~/.local/state/kaidadb/kaidadb.log
+```
+
+The password is **not stored on disk** — only its SHA-256 hash is saved at `{data_dir}/.server_key`. You cannot recover the plaintext from that file.
+
+### If You Lost the Password
+
+Regenerate a new one:
+
+```bash
+kaidadb-server --regenerate-key --config /path/to/config.toml
+# Prints: New server key: xY7pQ2wR...
+```
+
+This overwrites the old hash. Any clients using the old password will be rejected until updated.
+
+### How It Works
+
+- On first server start, a random 32-character alphanumeric password is generated
+- The SHA-256 hash is stored in `{data_dir}/.server_key`
+- Local connections (127.0.0.1 / ::1) bypass auth entirely
+- Remote connections must include the password on every request (both REST and gRPC)
+
+### Client Usage
+
+```bash
+# CLI
+kaidadb-cli --addr http://remote:50051 --server-pass <password> list
+
+# TUI
+kaidadb-tui --addr http://remote:50051 --server-pass <password>
+
+# REST
+curl -H "X-Server-Pass: <password>" http://remote:8080/v1/health
+```
+
 ## Logging
 
 KaidaDB uses the `RUST_LOG` environment variable for log level control:
@@ -252,8 +307,9 @@ vod_mode = true
 - [ ] Set `data_dir` to a path on the data partition
 - [ ] Tune `cache.max_size` based on available RAM (25-50% of free memory)
 - [ ] Increase `storage.chunk_size` for large files (4-8 MiB reduces index overhead)
+- [ ] **Save the server password** from first boot — store it securely
+- [ ] Back up `$DATA_DIR/.server_key` along with `$DATA_DIR/index/` periodically
 - [ ] Set up log rotation for `journalctl` or kaidadb-ctl logs
-- [ ] Back up `$DATA_DIR/index/` periodically (the WAL is the source of truth for metadata)
 - [ ] Use a reverse proxy (nginx/caddy) for TLS termination on the REST port
 - [ ] Firewall: expose only the REST port (8080) publicly; keep gRPC (50051) internal
 - [ ] Set `RUST_LOG=kaidadb=info` for production (avoid debug/trace in production)

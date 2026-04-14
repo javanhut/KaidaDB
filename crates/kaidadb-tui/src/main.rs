@@ -21,6 +21,10 @@ struct Args {
     /// Server gRPC address
     #[arg(short, long, default_value = "http://localhost:50051")]
     addr: String,
+
+    /// Server password for remote access
+    #[arg(long)]
+    server_pass: Option<String>,
 }
 
 #[tokio::main]
@@ -34,7 +38,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, args.addr).await;
+    let result = run(&mut terminal, args.addr, args.server_pass).await;
 
     disable_raw_mode()?;
     execute!(
@@ -54,8 +58,9 @@ async fn main() -> Result<()> {
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     addr: String,
+    server_pass: Option<String>,
 ) -> Result<()> {
-    let mut app = App::new(addr.clone());
+    let mut app = App::new(addr.clone(), server_pass);
 
     // Initial connect + load
     app.connect().await;

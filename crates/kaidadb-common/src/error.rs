@@ -31,6 +31,9 @@ pub enum KaidaDbError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }

@@ -412,6 +412,8 @@ echo "Done. Browse at: $KAIDADB_URL/v1/streams?prefix=music/$ARTIST/$ALBUM/"
 
 Segment data is served from the existing `GET /v1/media/{key}` endpoint. The playlist URLs point to `/v1/media/streams/...` paths.
 
+All streaming endpoints require the server password for remote access via the `X-Server-Pass` header (see [API Reference](./api-reference.md#authentication)).
+
 ## Streaming gRPC RPCs
 
 | RPC | Request | Response |

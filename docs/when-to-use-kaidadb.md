@@ -50,9 +50,9 @@ KaidaDB supports exactly two ways to find media: by exact key, or by key prefix.
 
 KaidaDB stores and serves media — it does not convert between formats. To use HLS/DASH streaming, you must transcode your files externally (FFmpeg) and upload the segments. This is by design (transcoding is CPU-heavy and would degrade storage performance), but it means more setup compared to an all-in-one media server.
 
-### No Authentication or Authorization
+### No Multi-User Access Control
 
-KaidaDB has no user accounts, no API keys, no access control. Anyone who can reach the port can read, write, and delete anything. For production deployments, put a reverse proxy (Nginx, Caddy) with authentication in front of it, or keep KaidaDB on a private network.
+KaidaDB has a server-wide password that protects remote access — local connections work without auth, remote connections require the auto-generated password. However, it has no user accounts, roles, or per-key permissions. Anyone with the server password has full read/write/delete access to everything. For fine-grained access control, put a reverse proxy or API gateway in front of it.
 
 ### No Encryption at Rest
 

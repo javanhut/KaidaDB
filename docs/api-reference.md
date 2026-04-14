@@ -2,6 +2,17 @@
 
 KaidaDB exposes two APIs — REST and gRPC — that share the same storage engine. Both can be used simultaneously. Use whichever fits your application.
 
+## Authentication
+
+All endpoints on both APIs are protected by a server password for remote access. See the [Getting Started guide](./getting-started.md#server-password-remote-access-security) for setup details.
+
+- **Local requests** (from 127.0.0.1 / ::1) pass through without authentication
+- **Remote requests** must include the server password:
+  - **REST**: `X-Server-Pass` header
+  - **gRPC**: `x-server-pass` metadata key
+
+Without the correct password, remote requests receive `401 Unauthorized` (REST) or `UNAUTHENTICATED` (gRPC).
+
 ## REST API
 
 The REST API listens on port 8080 by default. All responses use JSON unless otherwise noted.
@@ -324,6 +335,7 @@ Metadata keys are stored lowercase (HTTP headers are case-insensitive, so `X-Kai
 | `204` | No Content (DELETE success) |
 | `206` | Partial Content (Range request) |
 | `400` | Bad Request (invalid key, malformed request) |
+| `401` | Unauthorized (missing or invalid server password for remote access) |
 | `404` | Not Found |
 | `405` | Method Not Allowed |
 | `409` | Conflict (rename target already exists) |
@@ -454,6 +466,7 @@ message ListMediaResponse {
 
 | gRPC Status | When |
 |-------------|------|
+| `UNAUTHENTICATED` | Missing or invalid server password for remote access |
 | `NOT_FOUND` | Key doesn't exist |
 | `ALREADY_EXISTS` | Rename target already exists |
 | `INVALID_ARGUMENT` | Missing required fields, invalid key |
