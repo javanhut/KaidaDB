@@ -201,6 +201,14 @@ async fn run(
                                 app.browser_enter();
                             }
                         }
+                        KeyCode::Char('u') => {
+                            if let Some(entry) = app.browser_selected_entry() {
+                                if entry.is_dir {
+                                    let dir_path = entry.path.clone();
+                                    app.start_directory_upload(&dir_path);
+                                }
+                            }
+                        }
                         KeyCode::Char('.') => {
                             app.load_browser_dir();
                         }
@@ -258,8 +266,25 @@ async fn run(
                         KeyCode::Char('m') => app.enter_rename_mode(),
                         _ => {}
                     },
+                    InputMode::Uploading => match key.code {
+                        KeyCode::Esc => {
+                            app.upload_pending_files.clear();
+                            app.uploading = false;
+                            app.status_message = format!(
+                                "Upload cancelled ({}/{} completed)",
+                                app.upload_current, app.upload_total
+                            );
+                            app.refresh_media_list().await;
+                            app.input_mode = InputMode::Normal;
+                        }
+                        _ => {}
+                    },
                 }
             }
+        }
+
+        if app.input_mode == InputMode::Uploading && app.uploading {
+            app.upload_next_file().await;
         }
     }
 

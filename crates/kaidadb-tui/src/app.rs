@@ -15,6 +15,7 @@ pub enum InputMode {
     Detail,
     RenameInput,
     MkdirInput,
+    Uploading,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +103,13 @@ pub struct App {
     pub mkdir_input: String,
     pub mkdir_cursor: usize,
 
+    // Directory upload
+    pub upload_total: usize,
+    pub upload_current: usize,
+    pub upload_errors: Vec<String>,
+    pub uploading: bool,
+    pub upload_pending_files: Vec<(PathBuf, String)>,
+
     // Detail view
     pub detail_item: Option<MediaMetadata>,
 
@@ -149,6 +157,11 @@ impl App {
             rename_is_dir: false,
             mkdir_input: String::new(),
             mkdir_cursor: 0,
+            upload_total: 0,
+            upload_current: 0,
+            upload_errors: Vec::new(),
+            uploading: false,
+            upload_pending_files: Vec::new(),
             detail_item: None,
             health_status: "unknown".into(),
             server_version: String::new(),
@@ -388,7 +401,7 @@ impl App {
     pub fn enter_store_mode(&mut self) {
         self.store_key_input.clear();
         self.store_key_cursor = 0;
-        self.path_prefix.clear();
+        self.path_prefix = self.browse_prefix.clone();
         self.input_mode = InputMode::PathBrowser;
         self.load_path_entries();
     }
@@ -790,6 +803,94 @@ impl App {
         self.store_key_cursor = 0;
     }
 
+    pub fn start_directory_upload(&mut self, dir_path: &Path) {
+        let files = collect_files_recursive(dir_path);
+        if files.is_empty() {
+            self.status_message = "Directory is empty or unreadable".into();
+            return;
+        }
+
+        let mut pending = Vec::new();
+        for file_path in files {
+            let relative = file_path.strip_prefix(dir_path).unwrap_or(file_path.as_path());
+            let rel_str = relative.to_string_lossy().replace('\\', "/");
+            let key = format!("{}{}", self.path_prefix, rel_str);
+            pending.push((file_path, key));
+        }
+
+        self.upload_total = pending.len();
+        self.upload_current = 0;
+        self.upload_errors = Vec::new();
+        self.uploading = true;
+        self.upload_pending_files = pending;
+        self.input_mode = InputMode::Uploading;
+        self.status_message = format!("Starting upload of {} files...", self.upload_total);
+    }
+
+    pub async fn upload_next_file(&mut self) -> bool {
+        if self.upload_pending_files.is_empty() {
+            self.uploading = false;
+            let error_count = self.upload_errors.len();
+            let success_count = self.upload_total - error_count;
+            if error_count == 0 {
+                self.status_message = format!("Uploaded {} files", success_count);
+            } else {
+                self.status_message = format!(
+                    "Uploaded {}/{} files ({} errors)",
+                    success_count, self.upload_total, error_count
+                );
+            }
+            self.refresh_media_list().await;
+            self.input_mode = InputMode::Normal;
+            return false;
+        }
+
+        let (file_path, key) = self.upload_pending_files.remove(0);
+        self.upload_current += 1;
+        self.status_message = format!(
+            "Uploading {}/{}: {}",
+            self.upload_current, self.upload_total, key
+        );
+
+        let data = match tokio::fs::read(&file_path).await {
+            Ok(d) => d,
+            Err(e) => {
+                self.upload_errors.push(format!("{}: {}", key, e));
+                return true;
+            }
+        };
+
+        let ct = client::guess_content_type(&file_path.to_string_lossy()).to_string();
+
+        if let Some(ref mut client) = self.client {
+            let header = client::StoreMediaRequest {
+                request: Some(client::store_media_request::Request::Header(
+                    client::StoreMediaHeader {
+                        key: key.clone(),
+                        content_type: ct,
+                        metadata: Default::default(),
+                    },
+                )),
+            };
+
+            let chunk_size = 2 * 1024 * 1024;
+            let mut messages = vec![header];
+            for chunk in data.chunks(chunk_size) {
+                messages.push(client::StoreMediaRequest {
+                    request: Some(client::store_media_request::Request::ChunkData(
+                        chunk.to_vec(),
+                    )),
+                });
+            }
+
+            if let Err(e) = client.store_media(tokio_stream::iter(messages)).await {
+                self.upload_errors.push(format!("{}: {}", key, e));
+            }
+        }
+
+        true
+    }
+
     pub fn enter_delete_confirm(&mut self) {
         if let Some(entry) = self.selected_browse_entry() {
             if entry.is_dir {
@@ -1096,4 +1197,20 @@ impl App {
             }
         }
     }
+}
+
+fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(collect_files_recursive(&path));
+            } else if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
 }

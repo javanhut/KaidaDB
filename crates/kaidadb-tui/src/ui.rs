@@ -10,6 +10,7 @@ use crate::app::{App, InputMode, Panel};
 
 pub fn draw(f: &mut Frame, app: &App) {
     match app.input_mode {
+        InputMode::Uploading => draw_upload_progress(f, app),
         InputMode::Detail => draw_detail_view(f, app),
         InputMode::PathBrowser | InputMode::NewDirInput => draw_path_browser_view(f, app),
         InputMode::StoreKey | InputMode::FileBrowser => draw_store_view(f, app),
@@ -670,7 +671,7 @@ fn draw_store_view(f: &mut Frame, app: &App) {
             " Enter: confirm store │ Tab: back to file browser │ Left/Right: move cursor │ Esc: cancel "
         }
         InputMode::FileBrowser => {
-            " Enter: select file/open dir │ Left: parent dir │ Tab: back to path │ Esc: cancel "
+            " Enter: select file/open dir │ u: upload dir │ Left: parent dir │ Tab: back to path │ Esc: cancel "
         }
         _ => "",
     };
@@ -1138,4 +1139,98 @@ fn truncate(s: &str, max: usize) -> &str {
     } else {
         &s[..max]
     }
+}
+
+fn draw_upload_progress(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(5),
+            Constraint::Min(5),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    // Title
+    let title = Paragraph::new(Line::from(vec![Span::styled(
+        " Directory Upload ",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    f.render_widget(title, chunks[0]);
+
+    // Progress
+    let pct = if app.upload_total > 0 {
+        (app.upload_current * 100) / app.upload_total
+    } else {
+        0
+    };
+
+    let bar_width = chunks[1].width.saturating_sub(6) as usize;
+    let filled = (bar_width * pct) / 100;
+    let bar = format!(
+        "[{}{}] {}%",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(bar_width.saturating_sub(filled)),
+        pct
+    );
+
+    let progress = Paragraph::new(vec![
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            format!("  File {}/{}", app.upload_current, app.upload_total),
+            Style::default().fg(Color::White),
+        )]),
+        Line::from(vec![Span::styled(
+            format!("  {}", bar),
+            Style::default().fg(Color::Cyan),
+        )]),
+    ])
+    .block(Block::default().borders(Borders::ALL).title(" Progress "));
+    f.render_widget(progress, chunks[1]);
+
+    // Errors
+    let error_items: Vec<ListItem> = app
+        .upload_errors
+        .iter()
+        .map(|e| {
+            ListItem::new(Line::from(Span::styled(
+                format!("  x {}", e),
+                Style::default().fg(Color::Red),
+            )))
+        })
+        .collect();
+
+    let errors = List::new(error_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Errors ({}) ", app.upload_errors.len())),
+    );
+    f.render_widget(errors, chunks[2]);
+
+    // Status bar
+    let status = Paragraph::new(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(&app.status_message, Style::default().fg(Color::White)),
+        Span::raw("  "),
+        Span::styled(
+            "Esc: cancel upload",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(status, chunks[3]);
 }
