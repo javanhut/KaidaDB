@@ -15,20 +15,25 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use kaidadb_cache::ChunkCache;
+use kaidadb_common::config::StreamingConfig;
 use kaidadb_storage::StorageEngine;
+
+use crate::streaming;
 
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Arc<StorageEngine>,
     pub cache: Arc<ChunkCache>,
+    pub streaming: StreamingConfig,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/media", get(list_media))
         .route("/v1/media/rename", axum::routing::post(rename_media))
+        .route("/v1/streams", get(list_streams))
         .route("/v1/health", get(health))
-        .fallback(media_fallback)
+        .fallback(combined_fallback)
         .with_state(state)
         .layer(CorsLayer::permissive())
 }
@@ -412,22 +417,208 @@ fn parse_range_header(headers: &HeaderMap, total_size: u64) -> (u64, u64, bool) 
     (0, 0, false)
 }
 
-/// Fallback handler that routes `/v1/media/<key>` requests with slashes in the key
-/// to the appropriate handler. Axum's `{key}` parameter only matches a single path
-/// segment, but KaidaDB keys can contain slashes (e.g. `tv/show/s01/file.mp4`).
-async fn media_fallback(
+// ─── Streaming endpoints ────────────────────────────────────────────────────
+
+async fn list_streams(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> impl IntoResponse {
+    let prefix = query.prefix.unwrap_or_default();
+    let limit = query.limit.unwrap_or(100);
+    let cursor = query.cursor.unwrap_or_default();
+
+    match streaming::list_streams(&state.engine, &state.streaming, &prefix, limit, &cursor) {
+        Ok((items, next_cursor)) => axum::Json(serde_json::json!({
+            "items": items,
+            "next_cursor": next_cursor,
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+async fn get_hls_master(state: &AppState, stream_id: &str) -> Response {
+    match streaming::discover_variants(&state.engine, &state.streaming, stream_id) {
+        Ok(variants) if variants.is_empty() => StatusCode::NOT_FOUND.into_response(),
+        Ok(variants) => {
+            let playlist =
+                streaming::generate_hls_master(&variants, stream_id, &state.streaming);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .body(Body::from(playlist))
+                .unwrap()
+                .into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+async fn get_hls_media_playlist(
+    state: &AppState,
+    stream_id: &str,
+    variant_id: &str,
+) -> Response {
+    // Verify the variant exists by checking for init segment
+    let init_key = format!(
+        "{}{}variants/{}/init.mp4",
+        state.streaming.stream_prefix, stream_id, variant_id
+    );
+    match state.engine.get_manifest(&init_key) {
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(Some(_)) => {}
+    }
+
+    match streaming::discover_segments(&state.engine, &state.streaming, stream_id, variant_id) {
+        Ok(segments) => {
+            let playlist =
+                streaming::generate_hls_media(&segments, &init_key, &state.streaming);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .body(Body::from(playlist))
+                .unwrap()
+                .into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+async fn get_dash_mpd(state: &AppState, stream_id: &str) -> Response {
+    let variants = match streaming::discover_variants(&state.engine, &state.streaming, stream_id) {
+        Ok(v) if v.is_empty() => return StatusCode::NOT_FOUND.into_response(),
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+
+    let mut segments_by_variant = Vec::new();
+    for variant in &variants {
+        match streaming::discover_segments(
+            &state.engine,
+            &state.streaming,
+            stream_id,
+            &variant.variant_id,
+        ) {
+            Ok(segs) => segments_by_variant.push((variant.variant_id.clone(), segs)),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        }
+    }
+
+    let mpd = streaming::generate_dash_mpd(&variants, &segments_by_variant, &state.streaming);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/dash+xml")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from(mpd))
+        .unwrap()
+        .into_response()
+}
+
+async fn delete_stream_handler(state: &AppState, stream_id: &str) -> Response {
+    // Also invalidate cache for all chunks in this stream
+    let prefix = format!("{}{}/", state.streaming.stream_prefix, stream_id);
+    if let Ok((manifests, _)) = state.engine.list(&prefix, 100000, "") {
+        for manifest in &manifests {
+            for chunk_id in &manifest.chunks {
+                state.cache.invalidate(chunk_id);
+            }
+        }
+    }
+
+    match streaming::delete_stream(&state.engine, &state.streaming, stream_id) {
+        Ok((variants, segments)) => axum::Json(serde_json::json!({
+            "variants_deleted": variants,
+            "segments_deleted": segments,
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// Route streaming requests under /v1/streams/.
+/// Path patterns:
+///   {stream_id}/master.m3u8
+///   {stream_id}/variant/{variant_id}/playlist.m3u8
+///   {stream_id}/manifest.mpd
+///   DELETE {stream_id}
+async fn handle_streams_path(
+    state: &AppState,
+    method: &Method,
+    path_after_streams: &str,
+) -> Option<Response> {
+    let path = path_after_streams;
+
+    // master.m3u8
+    if let Some(stream_id) = path.strip_suffix("/master.m3u8") {
+        if *method == Method::GET {
+            return Some(get_hls_master(state, stream_id).await);
+        }
+        return Some(StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+
+    // manifest.mpd
+    if let Some(stream_id) = path.strip_suffix("/manifest.mpd") {
+        if *method == Method::GET {
+            return Some(get_dash_mpd(state, stream_id).await);
+        }
+        return Some(StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+
+    // variant/{variant_id}/playlist.m3u8
+    if path.ends_with("/playlist.m3u8") {
+        // Find "/variant/" in the path
+        if let Some(variant_pos) = path.rfind("/variant/") {
+            let stream_id = &path[..variant_pos];
+            let after_variant = &path[variant_pos + "/variant/".len()..];
+            if let Some(variant_id) = after_variant.strip_suffix("/playlist.m3u8") {
+                if *method == Method::GET {
+                    return Some(
+                        get_hls_media_playlist(state, stream_id, variant_id).await,
+                    );
+                }
+                return Some(StatusCode::METHOD_NOT_ALLOWED.into_response());
+            }
+        }
+    }
+
+    // DELETE /v1/streams/{stream_id}
+    if *method == Method::DELETE && !path.is_empty() && !path.contains('.') {
+        return Some(delete_stream_handler(state, path).await);
+    }
+
+    None
+}
+
+// ─── Fallback ───────────────────────────────────────────────────────────────
+
+/// Combined fallback handler that routes both /v1/streams/ and /v1/media/ requests.
+async fn combined_fallback(
     State(state): State<AppState>,
     req: Request,
 ) -> impl IntoResponse {
-    let path = req.uri().path();
+    let path = req.uri().path().to_string();
     let headers = req.headers().clone();
     let method = req.method().clone();
 
+    // Handle /v1/meta/ routes
     if let Some(raw_key) = path.strip_prefix("/v1/meta/") {
         let key = percent_decode_str(raw_key).decode_utf8_lossy().to_string();
         return get_meta(State(state), Path(key)).await.into_response();
     }
 
+    // Handle /v1/streams/ routes
+    if let Some(raw_path) = path.strip_prefix("/v1/streams/") {
+        let decoded = percent_decode_str(raw_path).decode_utf8_lossy().to_string();
+        if let Some(response) = handle_streams_path(&state, &method, &decoded).await {
+            return response;
+        }
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    // Handle /v1/media/ routes
     let Some(raw_key) = path.strip_prefix("/v1/media/") else {
         return StatusCode::NOT_FOUND.into_response();
     };

@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
 
     // gRPC server
     let grpc_addr = config.grpc_addr.parse()?;
-    let grpc_service = KaidaDbGrpc::new(engine.clone(), cache.clone());
+    let grpc_service = KaidaDbGrpc::new(engine.clone(), cache.clone(), config.streaming.clone());
 
     let grpc_server = TonicServer::builder()
         .add_service(KaidaDbServer::new(grpc_service))
@@ -53,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let rest_state = rest::AppState {
         engine: engine.clone(),
         cache: cache.clone(),
+        streaming: config.streaming.clone(),
     };
     let rest_app = rest::router(rest_state);
     let rest_addr: std::net::SocketAddr = config.rest_addr.parse()?;

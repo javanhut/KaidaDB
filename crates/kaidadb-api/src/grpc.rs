@@ -5,19 +5,30 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use kaidadb_cache::ChunkCache;
+use kaidadb_common::config::StreamingConfig;
 use kaidadb_storage::StorageEngine;
 
 use crate::proto::kaida_db_server::KaidaDb;
 use crate::proto::*;
+use crate::streaming;
 
 pub struct KaidaDbGrpc {
     engine: Arc<StorageEngine>,
     cache: Arc<ChunkCache>,
+    streaming: StreamingConfig,
 }
 
 impl KaidaDbGrpc {
-    pub fn new(engine: Arc<StorageEngine>, cache: Arc<ChunkCache>) -> Self {
-        Self { engine, cache }
+    pub fn new(
+        engine: Arc<StorageEngine>,
+        cache: Arc<ChunkCache>,
+        streaming: StreamingConfig,
+    ) -> Self {
+        Self {
+            engine,
+            cache,
+            streaming,
+        }
     }
 }
 
@@ -262,6 +273,139 @@ impl KaidaDb for KaidaDbGrpc {
             status: "ok".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             uptime_seconds: 0, // TODO: track uptime
+        }))
+    }
+
+    async fn get_hls_master_playlist(
+        &self,
+        request: Request<GetPlaylistRequest>,
+    ) -> Result<Response<PlaylistResponse>, Status> {
+        let stream_id = &request.into_inner().stream_id;
+        let variants = streaming::discover_variants(&self.engine, &self.streaming, stream_id)
+            .map_err(|e| Status::internal(e))?;
+
+        if variants.is_empty() {
+            return Err(Status::not_found(format!("stream not found: {}", stream_id)));
+        }
+
+        let body = streaming::generate_hls_master(&variants, stream_id, &self.streaming);
+        Ok(Response::new(PlaylistResponse {
+            content_type: "application/vnd.apple.mpegurl".into(),
+            body,
+        }))
+    }
+
+    async fn get_hls_media_playlist(
+        &self,
+        request: Request<GetVariantPlaylistRequest>,
+    ) -> Result<Response<PlaylistResponse>, Status> {
+        let req = request.into_inner();
+        let init_key = format!(
+            "{}{}variants/{}/init.mp4",
+            self.streaming.stream_prefix, req.stream_id, req.variant_id
+        );
+
+        self.engine
+            .get_manifest(&init_key)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found(format!("variant not found: {}", req.variant_id)))?;
+
+        let segments = streaming::discover_segments(
+            &self.engine,
+            &self.streaming,
+            &req.stream_id,
+            &req.variant_id,
+        )
+        .map_err(|e| Status::internal(e))?;
+
+        let body = streaming::generate_hls_media(&segments, &init_key, &self.streaming);
+        Ok(Response::new(PlaylistResponse {
+            content_type: "application/vnd.apple.mpegurl".into(),
+            body,
+        }))
+    }
+
+    async fn get_dash_manifest(
+        &self,
+        request: Request<GetPlaylistRequest>,
+    ) -> Result<Response<PlaylistResponse>, Status> {
+        let stream_id = &request.into_inner().stream_id;
+        let variants = streaming::discover_variants(&self.engine, &self.streaming, stream_id)
+            .map_err(|e| Status::internal(e))?;
+
+        if variants.is_empty() {
+            return Err(Status::not_found(format!("stream not found: {}", stream_id)));
+        }
+
+        let mut segments_by_variant = Vec::new();
+        for variant in &variants {
+            let segs = streaming::discover_segments(
+                &self.engine,
+                &self.streaming,
+                stream_id,
+                &variant.variant_id,
+            )
+            .map_err(|e| Status::internal(e))?;
+            segments_by_variant.push((variant.variant_id.clone(), segs));
+        }
+
+        let body =
+            streaming::generate_dash_mpd(&variants, &segments_by_variant, &self.streaming);
+        Ok(Response::new(PlaylistResponse {
+            content_type: "application/dash+xml".into(),
+            body,
+        }))
+    }
+
+    async fn list_streams(
+        &self,
+        request: Request<ListStreamsRequest>,
+    ) -> Result<Response<ListStreamsResponse>, Status> {
+        let req = request.into_inner();
+        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+
+        let (items, next_cursor) =
+            streaming::list_streams(&self.engine, &self.streaming, &req.prefix, limit, &req.cursor)
+                .map_err(|e| Status::internal(e))?;
+
+        let streams = items
+            .into_iter()
+            .map(|item| StreamInfo {
+                stream_id: item.stream_id,
+                variants: Vec::new(),
+                created_at: 0,
+            })
+            .collect();
+
+        Ok(Response::new(ListStreamsResponse {
+            streams,
+            next_cursor: next_cursor.unwrap_or_default(),
+        }))
+    }
+
+    async fn delete_stream(
+        &self,
+        request: Request<DeleteStreamRequest>,
+    ) -> Result<Response<DeleteStreamResponse>, Status> {
+        let stream_id = &request.into_inner().stream_id;
+
+        // Invalidate cache
+        let prefix = format!("{}{}/", self.streaming.stream_prefix, stream_id);
+        if let Ok((manifests, _)) = self.engine.list(&prefix, 100000, "") {
+            for manifest in &manifests {
+                for chunk_id in &manifest.chunks {
+                    self.cache.invalidate(chunk_id);
+                }
+            }
+        }
+
+        let (variants_deleted, segments_deleted) =
+            streaming::delete_stream(&self.engine, &self.streaming, stream_id)
+                .map_err(|e| Status::internal(e))?;
+
+        Ok(Response::new(DeleteStreamResponse {
+            variants_deleted,
+            segments_deleted,
         }))
     }
 }

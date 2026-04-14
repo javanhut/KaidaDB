@@ -9,3 +9,9 @@ chunk_size = 2097152  # 2 MiB
 max_size = 536870912  # 512 MiB
 prefetch_window = 3
 warm_on_write = false
+
+[streaming]
+target_duration = 4.0
+base_url = ""
+stream_prefix = "streams/"
+vod_mode = true

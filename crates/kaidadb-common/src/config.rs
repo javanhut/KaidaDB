@@ -23,6 +23,9 @@ pub struct KaidaDbConfig {
 
     #[serde(default)]
     pub cache: CacheConfig,
+
+    #[serde(default)]
+    pub streaming: StreamingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +57,7 @@ impl Default for KaidaDbConfig {
             rest_addr: default_rest_addr(),
             storage: StorageConfig::default(),
             cache: CacheConfig::default(),
+            streaming: StreamingConfig::default(),
         }
     }
 }
@@ -103,6 +107,49 @@ impl KaidaDbConfig {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamingConfig {
+    /// Default target segment duration in seconds (used in playlist generation)
+    #[serde(default = "default_target_duration")]
+    pub target_duration: f64,
+
+    /// Base URL prefix for segment URLs in playlists.
+    /// If empty, uses relative paths.
+    #[serde(default)]
+    pub base_url: String,
+
+    /// Key prefix for all streaming content
+    #[serde(default = "default_stream_prefix")]
+    pub stream_prefix: String,
+
+    /// Whether to include EXT-X-ENDLIST (VOD mode)
+    #[serde(default = "default_vod_mode")]
+    pub vod_mode: bool,
+}
+
+impl Default for StreamingConfig {
+    fn default() -> Self {
+        Self {
+            target_duration: default_target_duration(),
+            base_url: String::new(),
+            stream_prefix: default_stream_prefix(),
+            vod_mode: default_vod_mode(),
+        }
+    }
+}
+
+fn default_target_duration() -> f64 {
+    4.0
+}
+
+fn default_stream_prefix() -> String {
+    "streams/".to_string()
+}
+
+fn default_vod_mode() -> bool {
+    true
 }
 
 fn default_data_dir() -> PathBuf {

@@ -23,6 +23,13 @@ service KaidaDB {
 
     // Health check
     rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+    // Streaming playlist generation
+    rpc GetHlsMasterPlaylist(GetPlaylistRequest) returns (PlaylistResponse);
+    rpc GetHlsMediaPlaylist(GetVariantPlaylistRequest) returns (PlaylistResponse);
+    rpc GetDashManifest(GetPlaylistRequest) returns (PlaylistResponse);
+    rpc ListStreams(ListStreamsRequest) returns (ListStreamsResponse);
+    rpc DeleteStream(DeleteStreamRequest) returns (DeleteStreamResponse);
 }
 
 message StoreMediaRequest {
@@ -109,4 +116,56 @@ message HealthCheckResponse {
     string status = 1;
     string version = 2;
     uint64 uptime_seconds = 3;
+}
+
+// ─── Streaming playlist messages ────────────────────────────────────────────
+
+message GetPlaylistRequest {
+    string stream_id = 1;
+}
+
+message GetVariantPlaylistRequest {
+    string stream_id = 1;
+    string variant_id = 2;
+}
+
+message PlaylistResponse {
+    string content_type = 1;
+    string body = 2;
+}
+
+message ListStreamsRequest {
+    string prefix = 1;
+    uint32 limit = 2;
+    string cursor = 3;
+}
+
+message StreamInfo {
+    string stream_id = 1;
+    repeated VariantInfoProto variants = 2;
+    int64 created_at = 3;
+}
+
+message VariantInfoProto {
+    string variant_id = 1;
+    uint32 segment_count = 2;
+    uint64 bandwidth = 3;
+    uint32 width = 4;
+    uint32 height = 5;
+    string codec = 6;
+    string media_type = 7;
+}
+
+message ListStreamsResponse {
+    repeated StreamInfo streams = 1;
+    string next_cursor = 2;
+}
+
+message DeleteStreamRequest {
+    string stream_id = 1;
+}
+
+message DeleteStreamResponse {
+    uint32 variants_deleted = 1;
+    uint32 segments_deleted = 2;
 }
