@@ -100,7 +100,3 @@ kaidadb-tui
 | [Configuration](docs/configuration.md) | All config options, environment variables, and tuning advice |
 | [CLI and TUI](docs/cli-and-tui.md) | Command reference, keybindings, and media organization patterns |
 | [When to Use KaidaDB](docs/when-to-use-kaidadb.md) | Strengths, limitations, and guidance on when KaidaDB is the right tool |
-
-## License
-
-MIT
