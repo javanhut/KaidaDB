@@ -177,6 +177,7 @@ async fn run(
                         KeyCode::Esc => {
                             app.store_key_input.clear();
                             app.selected_file_path = None;
+                            app.browser_clear_marks();
                             app.input_mode = InputMode::Normal;
                         }
                         KeyCode::Tab => {
@@ -206,8 +207,12 @@ async fn run(
                                 app.browser_enter();
                             }
                         }
+                        KeyCode::Char(' ') => app.browser_toggle_mark(),
+                        KeyCode::Char('c') => app.browser_clear_marks(),
                         KeyCode::Char('u') => {
-                            if let Some(entry) = app.browser_selected_entry() {
+                            if !app.browser_marked.is_empty() {
+                                app.start_marked_upload();
+                            } else if let Some(entry) = app.browser_selected_entry() {
                                 if entry.is_dir {
                                     let dir_path = entry.path.clone();
                                     app.start_directory_upload(&dir_path);

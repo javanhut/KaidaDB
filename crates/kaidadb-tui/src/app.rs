@@ -92,6 +92,7 @@ pub struct App {
     pub browser_entries: Vec<FileEntry>,
     pub browser_selected: usize,
     pub browser_scroll_offset: usize,
+    pub browser_marked: BTreeSet<PathBuf>,
 
     // Rename/move
     pub rename_input: String,
@@ -152,6 +153,7 @@ impl App {
             browser_entries: Vec::new(),
             browser_selected: 0,
             browser_scroll_offset: 0,
+            browser_marked: BTreeSet::new(),
             rename_input: String::new(),
             rename_cursor: 0,
             rename_original_key: String::new(),
@@ -737,6 +739,28 @@ impl App {
             .unwrap_or(false)
     }
 
+    pub fn browser_is_marked(&self, path: &Path) -> bool {
+        self.browser_marked.contains(path)
+    }
+
+    pub fn browser_toggle_mark(&mut self) {
+        let Some(entry) = self.browser_entries.get(self.browser_selected) else {
+            return;
+        };
+        if entry.is_dir {
+            return;
+        }
+        let path = entry.path.clone();
+        if !self.browser_marked.remove(&path) {
+            self.browser_marked.insert(path);
+        }
+        self.browser_next();
+    }
+
+    pub fn browser_clear_marks(&mut self) {
+        self.browser_marked.clear();
+    }
+
     /// Auto-suggest a key from the path_prefix + filename
     pub fn suggest_key_from_path(&mut self, path: &Path) {
         if let Some(filename) = path.file_name() {
@@ -826,6 +850,53 @@ impl App {
         self.upload_pending_files = pending;
         self.input_mode = InputMode::Uploading;
         self.status_message = format!("Starting upload of {} files...", self.upload_total);
+    }
+
+    pub fn start_marked_upload(&mut self) {
+        if self.browser_marked.is_empty() {
+            self.status_message = "No files marked".into();
+            return;
+        }
+
+        let marked: Vec<PathBuf> = self.browser_marked.iter().cloned().collect();
+
+        let mut filename_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut pending: Vec<(PathBuf, String)> = Vec::with_capacity(marked.len());
+        for path in marked {
+            let filename = path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if filename.is_empty() {
+                continue;
+            }
+            *filename_counts.entry(filename.clone()).or_insert(0) += 1;
+            let key = format!("{}{}", self.path_prefix, filename);
+            pending.push((path, key));
+        }
+
+        let dup_count: usize = filename_counts
+            .values()
+            .filter(|&&n| n > 1)
+            .map(|&n| n - 1)
+            .sum();
+
+        self.upload_total = pending.len();
+        self.upload_current = 0;
+        self.upload_errors = Vec::new();
+        self.uploading = true;
+        self.upload_pending_files = pending;
+        self.browser_marked.clear();
+        self.input_mode = InputMode::Uploading;
+        self.status_message = if dup_count > 0 {
+            format!(
+                "Starting upload of {} files (warning: {} duplicate filenames — later uploads will overwrite earlier ones)",
+                self.upload_total, dup_count
+            )
+        } else {
+            format!("Starting upload of {} files...", self.upload_total)
+        };
     }
 
     pub async fn upload_next_file(&mut self) -> bool {

@@ -634,11 +634,19 @@ fn draw_store_view(f: &mut Frame, app: &App) {
         .split(area);
 
     // Title bar
-    let subtitle = match app.input_mode {
+    let marked_suffix = if app.input_mode == InputMode::FileBrowser
+        && !app.browser_marked.is_empty()
+    {
+        format!(" — {} marked", app.browser_marked.len())
+    } else {
+        String::new()
+    };
+    let subtitle_base = match app.input_mode {
         InputMode::FileBrowser => "Select a file to store",
         InputMode::StoreKey => "Review the key and press Enter to store",
         _ => "Select a file to store",
     };
+    let subtitle = format!("{}{}", subtitle_base, marked_suffix);
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
             " Store Media ",
@@ -671,7 +679,7 @@ fn draw_store_view(f: &mut Frame, app: &App) {
             " Enter: confirm store │ Tab: back to file browser │ Left/Right: move cursor │ Esc: cancel "
         }
         InputMode::FileBrowser => {
-            " Enter: select file/open dir │ u: upload dir │ Left: parent dir │ Tab: back to path │ Esc: cancel "
+            " Space: mark │ u: upload marked/dir │ c: clear marks │ Enter: open/store │ Left: parent │ Tab: back │ Esc: cancel "
         }
         _ => "",
     };
@@ -790,6 +798,7 @@ fn draw_file_browser(f: &mut Frame, app: &App, area: Rect) {
         .take(visible_rows)
         .map(|(i, entry)| {
             let is_selected = i == app.browser_selected;
+            let is_marked = !entry.is_dir && app.browser_is_marked(&entry.path);
 
             let icon = if entry.is_dir { " " } else { " " };
             let icon_color = if entry.is_dir {
@@ -822,7 +831,25 @@ fn draw_file_browser(f: &mut Frame, app: &App, area: Rect) {
 
             let icon_style = if is_selected { hl } else { Style::default().fg(icon_color) };
 
+            let checkbox = if entry.is_dir {
+                "    "
+            } else if is_marked {
+                "[x] "
+            } else {
+                "[ ] "
+            };
+            let checkbox_style = if is_selected {
+                hl
+            } else if is_marked {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
             ListItem::new(Line::from(vec![
+                Span::styled(checkbox, checkbox_style),
                 Span::styled(icon, icon_style),
                 Span::styled(format!("{:<}", &entry.name), name_style),
                 Span::styled(format!("  {}", size_str), size_style),
