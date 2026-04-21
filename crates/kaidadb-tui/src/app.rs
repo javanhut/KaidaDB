@@ -11,6 +11,7 @@ pub enum InputMode {
     StoreKey,
     FileBrowser,
     DeleteConfirm,
+    DeleteDirConfirm,
     Detail,
     RenameInput,
     MkdirInput,
@@ -117,6 +118,9 @@ pub struct App {
     // Health
     pub health_status: String,
     pub server_version: String,
+
+    // View options
+    pub show_hidden_files: bool,
 }
 
 impl App {
@@ -168,6 +172,7 @@ impl App {
             detail_item: None,
             health_status: "unknown".into(),
             server_version: String::new(),
+            show_hidden_files: false,
         }
     }
 
@@ -260,8 +265,23 @@ impl App {
                 continue;
             }
             if let Some(slash_pos) = suffix.find('/') {
-                dirs.insert(suffix[..slash_pos].to_string());
+                let dir_name = &suffix[..slash_pos];
+                if !self.show_hidden_files && dir_name.starts_with('.') {
+                    continue;
+                }
+                dirs.insert(dir_name.to_string());
             } else if suffix != ".kaidadb_dir" {
+                if !self.show_hidden_files && suffix.starts_with('.') {
+                    continue;
+                }
+                files.push(BrowseEntry {
+                    name: suffix.to_string(),
+                    is_dir: false,
+                    full_key: Some(item.key.clone()),
+                    item_count: 0,
+                    size: item.total_size,
+                });
+            } else if self.show_hidden_files {
                 files.push(BrowseEntry {
                     name: suffix.to_string(),
                     is_dir: false,
@@ -655,6 +675,9 @@ impl App {
             for entry in read_dir.flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
+                if !self.show_hidden_files && name.starts_with('.') {
+                    continue;
+                }
                 let meta = entry.metadata().ok();
                 let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
                 let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -966,16 +989,31 @@ impl App {
     pub fn enter_delete_confirm(&mut self) {
         if let Some(entry) = self.selected_browse_entry() {
             if entry.is_dir {
-                self.status_message = format!(
-                    "Directory has {} items, delete them first (directory disappears when empty)",
-                    entry.item_count
-                );
+                self.input_mode = InputMode::DeleteDirConfirm;
                 return;
             }
         }
         if self.selected_item().is_some() {
             self.input_mode = InputMode::DeleteConfirm;
         }
+    }
+
+    pub fn toggle_hidden_files(&mut self) {
+        self.show_hidden_files = !self.show_hidden_files;
+        self.rebuild_browse_entries();
+        self.load_browser_dir();
+        self.status_message = format!(
+            "Hidden files: {}",
+            if self.show_hidden_files { "on" } else { "off" }
+        );
+    }
+
+    pub fn selected_dir_prefix(&self) -> Option<String> {
+        let entry = self.selected_browse_entry()?;
+        if !entry.is_dir {
+            return None;
+        }
+        Some(format!("{}{}/", self.browse_prefix, entry.name))
     }
 
     // --- Rename / Move ---
@@ -1268,6 +1306,54 @@ impl App {
                 }
             }
         }
+    }
+
+    pub async fn execute_delete_directory(&mut self) {
+        let prefix = match self.selected_dir_prefix() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let keys: Vec<String> = self
+            .items
+            .iter()
+            .filter(|i| i.key.starts_with(&prefix))
+            .map(|i| i.key.clone())
+            .collect();
+
+        if keys.is_empty() {
+            self.status_message = format!("Directory '{}' is already empty", prefix);
+            self.refresh_media_list().await;
+            return;
+        }
+
+        let total = keys.len();
+        let mut deleted = 0usize;
+        let mut errors = 0usize;
+
+        if let Some(ref mut client) = self.client {
+            for key in &keys {
+                match client
+                    .delete_media(client::DeleteMediaRequest { key: key.clone() })
+                    .await
+                {
+                    Ok(resp) => {
+                        if resp.into_inner().deleted {
+                            deleted += 1;
+                        }
+                    }
+                    Err(_) => {
+                        errors += 1;
+                    }
+                }
+            }
+        }
+
+        self.status_message = format!(
+            "Force-deleted '{}' ({}/{} deleted, {} errors)",
+            prefix, deleted, total, errors
+        );
+        self.refresh_media_list().await;
     }
 }
 

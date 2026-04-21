@@ -97,6 +97,7 @@ async fn run(
                         KeyCode::Char('s') => app.enter_store_mode(),
                         KeyCode::Char('/') => app.enter_search_mode(),
                         KeyCode::Char('n') => app.search_next(),
+                        KeyCode::Char('.') => app.toggle_hidden_files(),
                         KeyCode::Tab => app.toggle_panel(),
                         KeyCode::Esc => app.back(),
                         _ => {}
@@ -219,9 +220,7 @@ async fn run(
                                 }
                             }
                         }
-                        KeyCode::Char('.') => {
-                            app.load_browser_dir();
-                        }
+                        KeyCode::Char('.') => app.toggle_hidden_files(),
                         _ => {}
                     },
                     InputMode::RenameInput => match key.code {
@@ -262,6 +261,15 @@ async fn run(
                     InputMode::DeleteConfirm => match key.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
                             app.execute_delete().await;
+                            app.input_mode = InputMode::Normal;
+                        }
+                        _ => {
+                            app.input_mode = InputMode::Normal;
+                        }
+                    },
+                    InputMode::DeleteDirConfirm => match key.code {
+                        KeyCode::Char('Y') => {
+                            app.execute_delete_directory().await;
                             app.input_mode = InputMode::Normal;
                         }
                         _ => {

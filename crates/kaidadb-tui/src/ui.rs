@@ -18,6 +18,10 @@ pub fn draw(f: &mut Frame, app: &App) {
             draw_main_layout(f, app);
             draw_delete_confirm(f, app);
         }
+        InputMode::DeleteDirConfirm => {
+            draw_main_layout(f, app);
+            draw_delete_dir_confirm(f, app);
+        }
         InputMode::RenameInput => {
             draw_main_layout(f, app);
             draw_rename_dialog(f, app);
@@ -259,16 +263,21 @@ fn detail_row<'a>(label: &'a str, value: &'a str, color: Color, bold: bool) -> R
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    let hidden_hint = if app.show_hidden_files {
+        ". hidden:on"
+    } else {
+        ". hidden:off"
+    };
     let keybinds = match app.input_mode {
         InputMode::Normal => {
             if app.browse_prefix.is_empty() {
-                " q Quit │ j/k Nav │ Enter Open │ s Store │ d Del │ m Rename │ M Mkdir │ / Search │ r Refresh "
+                format!(" q Quit │ j/k Nav │ Enter Open │ s Store │ d Del │ m Rename │ M Mkdir │ / Search │ r Refresh │ {} ", hidden_hint)
             } else {
-                " q/Bksp Back │ j/k Nav │ Enter Open │ s Store │ d Del │ m Rename │ M Mkdir │ / Search "
+                format!(" q/Bksp Back │ j/k Nav │ Enter Open │ s Store │ d Del │ m Rename │ M Mkdir │ / Search │ {} ", hidden_hint)
             }
         }
-        InputMode::Detail => " Esc Back │ d Delete │ m Rename ",
-        _ => "",
+        InputMode::Detail => " Esc Back │ d Delete │ m Rename ".to_string(),
+        _ => String::new(),
     };
 
     let chunks = Layout::default()
@@ -674,14 +683,22 @@ fn draw_store_view(f: &mut Frame, app: &App) {
     draw_file_browser(f, app, chunks[2]);
 
     // Keybinds
+    let hidden_hint = if app.show_hidden_files {
+        " │ . hidden:on"
+    } else {
+        " │ . hidden:off"
+    };
     let help = match app.input_mode {
         InputMode::StoreKey => {
-            " Enter: confirm store │ Tab: back to file browser │ Left/Right: move cursor │ Esc: cancel "
+            " Enter: confirm store │ Tab: back to file browser │ Left/Right: move cursor │ Esc: cancel ".to_string()
         }
         InputMode::FileBrowser => {
-            " Space: mark │ u: upload marked/dir │ c: clear marks │ Enter: open/store │ Left: parent │ Tab: back │ Esc: cancel "
+            format!(
+                " Space: mark │ u: upload marked/dir │ c: clear marks │ Enter: open/store │ Left: parent │ Tab: back │ Esc: cancel{} ",
+                hidden_hint
+            )
         }
-        _ => "",
+        _ => String::new(),
     };
     let status = Paragraph::new(Line::from(vec![
         Span::raw(" "),
@@ -897,6 +914,59 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from(Span::styled(
             "  y Yes │ any other key: cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+// ── Delete Directory Confirm (Force) ─────────────────────────────────
+
+fn draw_delete_dir_confirm(f: &mut Frame, app: &App) {
+    let (prefix, count) = app
+        .selected_browse_entry()
+        .filter(|e| e.is_dir)
+        .map(|e| (format!("{}{}/", app.browse_prefix, e.name), e.item_count))
+        .unwrap_or_else(|| ("?".to_string(), 0));
+
+    let width = (prefix.len() as u16 + 24).max(60).min(f.area().width - 4);
+    let area = centered_rect(width, 9, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" FORCE DELETE DIRECTORY ")
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Recursively delete "),
+            Span::styled(
+                &prefix,
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ?"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("  {} item(s) will be permanently removed.", count),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Press Y (shift+y) to force delete · any other key: cancel",
             Style::default().fg(Color::DarkGray),
         )),
     ];
