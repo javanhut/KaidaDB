@@ -1265,9 +1265,10 @@ fn draw_upload_progress(f: &mut Frame, app: &App) {
     );
     f.render_widget(title, chunks[0]);
 
-    // Progress
-    let pct = if app.upload_total > 0 {
-        (app.upload_current * 100) / app.upload_total
+    // Progress — bar shows current file's byte progress
+    let pct = if app.upload_current_bytes_total > 0 {
+        ((app.upload_current_bytes_sent.min(app.upload_current_bytes_total) * 100)
+            / app.upload_current_bytes_total) as usize
     } else {
         0
     };
@@ -1281,10 +1282,27 @@ fn draw_upload_progress(f: &mut Frame, app: &App) {
         pct
     );
 
+    let bytes_label = if app.upload_current_bytes_total > 0 {
+        format!(
+            "  {} / {}",
+            format_bytes(app.upload_current_bytes_sent),
+            format_bytes(app.upload_current_bytes_total)
+        )
+    } else {
+        String::from("  preparing...")
+    };
+
     let progress = Paragraph::new(vec![
         Line::from(""),
         Line::from(vec![Span::styled(
-            format!("  File {}/{}", app.upload_current, app.upload_total),
+            format!(
+                "  File {}/{}  ({} done, {} errors){}",
+                app.upload_current,
+                app.upload_total,
+                app.upload_successes,
+                app.upload_errors.len(),
+                &bytes_label
+            ),
             Style::default().fg(Color::White),
         )]),
         Line::from(vec![Span::styled(

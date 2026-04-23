@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, watch};
 
 pub enum UploadEvent {
-    Started { key: String },
+    Started { key: String, total_bytes: u64 },
+    ChunkSent { bytes_sent: u64 },
     FileCompleted,
     FileFailed { key: String, error: String },
     Finished,
@@ -119,6 +120,9 @@ pub struct App {
     pub upload_successes: usize,
     pub upload_errors: Vec<String>,
     pub uploading: bool,
+    pub upload_current_key: String,
+    pub upload_current_bytes_sent: u64,
+    pub upload_current_bytes_total: u64,
     pub upload_rx: Option<mpsc::UnboundedReceiver<UploadEvent>>,
     pub upload_cancel: Option<watch::Sender<bool>>,
     pub needs_refresh_after_upload: bool,
@@ -180,6 +184,9 @@ impl App {
             upload_successes: 0,
             upload_errors: Vec::new(),
             uploading: false,
+            upload_current_key: String::new(),
+            upload_current_bytes_sent: 0,
+            upload_current_bytes_total: 0,
             upload_rx: None,
             upload_cancel: None,
             needs_refresh_after_upload: false,
@@ -917,15 +924,22 @@ impl App {
         if let Some(rx) = self.upload_rx.as_mut() {
             loop {
                 match rx.try_recv() {
-                    Ok(UploadEvent::Started { key }) => {
+                    Ok(UploadEvent::Started { key, total_bytes }) => {
                         self.upload_current += 1;
+                        self.upload_current_key = key.clone();
+                        self.upload_current_bytes_sent = 0;
+                        self.upload_current_bytes_total = total_bytes;
                         self.status_message = format!(
                             "Uploading {}/{}: {}",
                             self.upload_current, self.upload_total, key
                         );
                     }
+                    Ok(UploadEvent::ChunkSent { bytes_sent }) => {
+                        self.upload_current_bytes_sent = bytes_sent;
+                    }
                     Ok(UploadEvent::FileCompleted) => {
                         self.upload_successes += 1;
+                        self.upload_current_bytes_sent = self.upload_current_bytes_total;
                     }
                     Ok(UploadEvent::FileFailed { key, error }) => {
                         self.upload_errors.push(format!("{}: {}", key, error));
@@ -1366,20 +1380,25 @@ async fn run_upload_worker(
     tx: mpsc::UnboundedSender<UploadEvent>,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
+    use tokio_stream::StreamExt;
+
     for (file_path, key) in pending {
         if *cancel_rx.borrow() {
             break;
-        }
-        if tx
-            .send(UploadEvent::Started { key: key.clone() })
-            .is_err()
-        {
-            return;
         }
 
         let data = match tokio::fs::read(&file_path).await {
             Ok(d) => d,
             Err(e) => {
+                if tx
+                    .send(UploadEvent::Started {
+                        key: key.clone(),
+                        total_bytes: 0,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
                 let _ = tx.send(UploadEvent::FileFailed {
                     key,
                     error: e.to_string(),
@@ -1387,6 +1406,17 @@ async fn run_upload_worker(
                 continue;
             }
         };
+
+        let total_bytes = data.len() as u64;
+        if tx
+            .send(UploadEvent::Started {
+                key: key.clone(),
+                total_bytes,
+            })
+            .is_err()
+        {
+            return;
+        }
 
         let ct = client::guess_content_type(&file_path.to_string_lossy()).to_string();
 
@@ -1399,17 +1429,29 @@ async fn run_upload_worker(
                 },
             )),
         };
-        let chunk_size = 2 * 1024 * 1024;
-        let mut messages = vec![header];
+        let chunk_size = 2 * 1024 * 1024usize;
+        let mut items: Vec<(u64, client::StoreMediaRequest)> = Vec::new();
+        items.push((0, header));
+        let mut running = 0u64;
         for chunk in data.chunks(chunk_size) {
-            messages.push(client::StoreMediaRequest {
-                request: Some(client::store_media_request::Request::ChunkData(
-                    chunk.to_vec(),
-                )),
-            });
+            running += chunk.len() as u64;
+            items.push((
+                running,
+                client::StoreMediaRequest {
+                    request: Some(client::store_media_request::Request::ChunkData(
+                        chunk.to_vec(),
+                    )),
+                },
+            ));
         }
 
-        let call = client.store_media(tokio_stream::iter(messages));
+        let tx_progress = tx.clone();
+        let stream = tokio_stream::iter(items).map(move |(bytes_sent, msg)| {
+            let _ = tx_progress.send(UploadEvent::ChunkSent { bytes_sent });
+            msg
+        });
+
+        let call = client.store_media(stream);
         tokio::select! {
             res = cancel_rx.changed() => {
                 let _ = res;
