@@ -1,6 +1,14 @@
 use crate::client::{self, AuthClient, MediaMetadata};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use tokio::sync::{mpsc, watch};
+
+pub enum UploadEvent {
+    Started { key: String },
+    FileCompleted,
+    FileFailed { key: String, error: String },
+    Finished,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputMode {
@@ -105,12 +113,15 @@ pub struct App {
     pub mkdir_input: String,
     pub mkdir_cursor: usize,
 
-    // Directory upload
+    // Background upload worker
     pub upload_total: usize,
     pub upload_current: usize,
+    pub upload_successes: usize,
     pub upload_errors: Vec<String>,
     pub uploading: bool,
-    pub upload_pending_files: Vec<(PathBuf, String)>,
+    pub upload_rx: Option<mpsc::UnboundedReceiver<UploadEvent>>,
+    pub upload_cancel: Option<watch::Sender<bool>>,
+    pub needs_refresh_after_upload: bool,
 
     // Detail view
     pub detail_item: Option<MediaMetadata>,
@@ -166,9 +177,12 @@ impl App {
             mkdir_cursor: 0,
             upload_total: 0,
             upload_current: 0,
+            upload_successes: 0,
             upload_errors: Vec::new(),
             uploading: false,
-            upload_pending_files: Vec::new(),
+            upload_rx: None,
+            upload_cancel: None,
+            needs_refresh_after_upload: false,
             detail_item: None,
             health_status: "unknown".into(),
             server_version: String::new(),
@@ -793,62 +807,20 @@ impl App {
         }
     }
 
-    pub async fn execute_store_file(&mut self, file_path: &Path) {
+    pub fn execute_store_file(&mut self, file_path: &Path) {
         let key = self.store_key_input.clone();
 
         if key.is_empty() {
             self.status_message = "Key is required".into();
+            self.input_mode = InputMode::Normal;
             return;
-        }
-
-        let data = match tokio::fs::read(file_path).await {
-            Ok(d) => d,
-            Err(e) => {
-                self.status_message = format!("Failed to read file: {e}");
-                return;
-            }
-        };
-
-        let ct = client::guess_content_type(&file_path.to_string_lossy()).to_string();
-
-        if let Some(ref mut client) = self.client {
-            let header = client::StoreMediaRequest {
-                request: Some(client::store_media_request::Request::Header(
-                    client::StoreMediaHeader {
-                        key: key.clone(),
-                        content_type: ct,
-                        metadata: Default::default(),
-                    },
-                )),
-            };
-
-            let chunk_size = 2 * 1024 * 1024;
-            let mut messages = vec![header];
-            for chunk in data.chunks(chunk_size) {
-                messages.push(client::StoreMediaRequest {
-                    request: Some(client::store_media_request::Request::ChunkData(
-                        chunk.to_vec(),
-                    )),
-                });
-            }
-
-            match client.store_media(tokio_stream::iter(messages)).await {
-                Ok(resp) => {
-                    let r = resp.into_inner();
-                    self.status_message = format!(
-                        "Stored '{}': {} bytes, {} chunks",
-                        r.key, r.total_size, r.chunk_count
-                    );
-                    self.refresh_media_list().await;
-                }
-                Err(e) => {
-                    self.status_message = format!("Store failed: {e}");
-                }
-            }
         }
 
         self.store_key_input.clear();
         self.store_key_cursor = 0;
+
+        let pending = vec![(file_path.to_path_buf(), key)];
+        self.begin_upload(pending);
     }
 
     pub fn start_directory_upload(&mut self, dir_path: &Path) {
@@ -866,13 +838,9 @@ impl App {
             pending.push((file_path, key));
         }
 
-        self.upload_total = pending.len();
-        self.upload_current = 0;
-        self.upload_errors = Vec::new();
-        self.uploading = true;
-        self.upload_pending_files = pending;
-        self.input_mode = InputMode::Uploading;
-        self.status_message = format!("Starting upload of {} files...", self.upload_total);
+        let total = pending.len();
+        self.begin_upload(pending);
+        self.status_message = format!("Starting upload of {} files...", total);
     }
 
     pub fn start_marked_upload(&mut self) {
@@ -905,85 +873,104 @@ impl App {
             .map(|&n| n - 1)
             .sum();
 
-        self.upload_total = pending.len();
-        self.upload_current = 0;
-        self.upload_errors = Vec::new();
-        self.uploading = true;
-        self.upload_pending_files = pending;
         self.browser_marked.clear();
-        self.input_mode = InputMode::Uploading;
+        let total = pending.len();
+        self.begin_upload(pending);
         self.status_message = if dup_count > 0 {
             format!(
                 "Starting upload of {} files (warning: {} duplicate filenames — later uploads will overwrite earlier ones)",
-                self.upload_total, dup_count
+                total, dup_count
             )
         } else {
-            format!("Starting upload of {} files...", self.upload_total)
+            format!("Starting upload of {} files...", total)
         };
     }
 
-    pub async fn upload_next_file(&mut self) -> bool {
-        if self.upload_pending_files.is_empty() {
-            self.uploading = false;
-            let error_count = self.upload_errors.len();
-            let success_count = self.upload_total - error_count;
-            if error_count == 0 {
-                self.status_message = format!("Uploaded {} files", success_count);
-            } else {
-                self.status_message = format!(
-                    "Uploaded {}/{} files ({} errors)",
-                    success_count, self.upload_total, error_count
-                );
-            }
-            self.refresh_media_list().await;
-            self.input_mode = InputMode::Normal;
-            return false;
-        }
+    fn begin_upload(&mut self, pending: Vec<(PathBuf, String)>) {
+        self.upload_total = pending.len();
+        self.upload_current = 0;
+        self.upload_successes = 0;
+        self.upload_errors = Vec::new();
 
-        let (file_path, key) = self.upload_pending_files.remove(0);
-        self.upload_current += 1;
-        self.status_message = format!(
-            "Uploading {}/{}: {}",
-            self.upload_current, self.upload_total, key
-        );
-
-        let data = match tokio::fs::read(&file_path).await {
-            Ok(d) => d,
-            Err(e) => {
-                self.upload_errors.push(format!("{}: {}", key, e));
-                return true;
+        let client = match self.client.clone() {
+            Some(c) => c,
+            None => {
+                self.uploading = false;
+                self.input_mode = InputMode::Normal;
+                self.status_message = "Not connected to server".into();
+                return;
             }
         };
 
-        let ct = client::guess_content_type(&file_path.to_string_lossy()).to_string();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        tokio::spawn(run_upload_worker(client, pending, tx, cancel_rx));
 
-        if let Some(ref mut client) = self.client {
-            let header = client::StoreMediaRequest {
-                request: Some(client::store_media_request::Request::Header(
-                    client::StoreMediaHeader {
-                        key: key.clone(),
-                        content_type: ct,
-                        metadata: Default::default(),
-                    },
-                )),
-            };
+        self.upload_rx = Some(rx);
+        self.upload_cancel = Some(cancel_tx);
+        self.uploading = true;
+        self.input_mode = InputMode::Uploading;
+    }
 
-            let chunk_size = 2 * 1024 * 1024;
-            let mut messages = vec![header];
-            for chunk in data.chunks(chunk_size) {
-                messages.push(client::StoreMediaRequest {
-                    request: Some(client::store_media_request::Request::ChunkData(
-                        chunk.to_vec(),
-                    )),
-                });
-            }
-
-            if let Err(e) = client.store_media(tokio_stream::iter(messages)).await {
-                self.upload_errors.push(format!("{}: {}", key, e));
+    pub fn drain_upload_events(&mut self) {
+        let mut finished = false;
+        if let Some(rx) = self.upload_rx.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok(UploadEvent::Started { key }) => {
+                        self.upload_current += 1;
+                        self.status_message = format!(
+                            "Uploading {}/{}: {}",
+                            self.upload_current, self.upload_total, key
+                        );
+                    }
+                    Ok(UploadEvent::FileCompleted) => {
+                        self.upload_successes += 1;
+                    }
+                    Ok(UploadEvent::FileFailed { key, error }) => {
+                        self.upload_errors.push(format!("{}: {}", key, error));
+                    }
+                    Ok(UploadEvent::Finished) => {
+                        finished = true;
+                        break;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
+                    }
+                }
             }
         }
 
-        true
+        if finished {
+            self.upload_rx = None;
+            self.upload_cancel = None;
+            self.uploading = false;
+            let error_count = self.upload_errors.len();
+            let done = self.upload_successes + error_count;
+            self.status_message = if done < self.upload_total {
+                format!(
+                    "Upload cancelled ({}/{} completed, {} errors)",
+                    self.upload_successes, self.upload_total, error_count
+                )
+            } else if error_count == 0 {
+                format!("Uploaded {} files", self.upload_successes)
+            } else {
+                format!(
+                    "Uploaded {}/{} files ({} errors)",
+                    self.upload_successes, self.upload_total, error_count
+                )
+            };
+            self.input_mode = InputMode::Normal;
+            self.needs_refresh_after_upload = true;
+        }
+    }
+
+    pub fn cancel_upload(&mut self) {
+        if let Some(tx) = self.upload_cancel.as_ref() {
+            let _ = tx.send(true);
+        }
     }
 
     pub fn enter_delete_confirm(&mut self) {
@@ -1371,4 +1358,76 @@ fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
     }
     files.sort();
     files
+}
+
+async fn run_upload_worker(
+    mut client: AuthClient,
+    pending: Vec<(PathBuf, String)>,
+    tx: mpsc::UnboundedSender<UploadEvent>,
+    mut cancel_rx: watch::Receiver<bool>,
+) {
+    for (file_path, key) in pending {
+        if *cancel_rx.borrow() {
+            break;
+        }
+        if tx
+            .send(UploadEvent::Started { key: key.clone() })
+            .is_err()
+        {
+            return;
+        }
+
+        let data = match tokio::fs::read(&file_path).await {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = tx.send(UploadEvent::FileFailed {
+                    key,
+                    error: e.to_string(),
+                });
+                continue;
+            }
+        };
+
+        let ct = client::guess_content_type(&file_path.to_string_lossy()).to_string();
+
+        let header = client::StoreMediaRequest {
+            request: Some(client::store_media_request::Request::Header(
+                client::StoreMediaHeader {
+                    key: key.clone(),
+                    content_type: ct,
+                    metadata: Default::default(),
+                },
+            )),
+        };
+        let chunk_size = 2 * 1024 * 1024;
+        let mut messages = vec![header];
+        for chunk in data.chunks(chunk_size) {
+            messages.push(client::StoreMediaRequest {
+                request: Some(client::store_media_request::Request::ChunkData(
+                    chunk.to_vec(),
+                )),
+            });
+        }
+
+        let call = client.store_media(tokio_stream::iter(messages));
+        tokio::select! {
+            res = cancel_rx.changed() => {
+                let _ = res;
+                break;
+            }
+            res = call => {
+                match res {
+                    Ok(_) => { let _ = tx.send(UploadEvent::FileCompleted); }
+                    Err(e) => {
+                        let _ = tx.send(UploadEvent::FileFailed {
+                            key,
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = tx.send(UploadEvent::Finished);
 }

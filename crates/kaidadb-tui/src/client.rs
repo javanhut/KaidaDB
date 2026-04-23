@@ -1,4 +1,5 @@
 use tonic::service::interceptor::InterceptedService;
+use tonic::service::Interceptor;
 use tonic::transport::Channel;
 
 pub mod proto {
@@ -8,7 +9,28 @@ pub mod proto {
 pub use proto::kaida_db_client::KaidaDbClient;
 pub use proto::*;
 
-pub type AuthInterceptor = Box<dyn FnMut(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Send>;
+#[derive(Clone)]
+pub struct AuthInterceptor {
+    pass: Option<String>,
+}
+
+impl Interceptor for AuthInterceptor {
+    fn call(
+        &mut self,
+        mut req: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        if let Some(pass) = &self.pass {
+            req.metadata_mut().insert(
+                "x-server-pass",
+                pass.parse().map_err(|_| {
+                    tonic::Status::invalid_argument("invalid server password characters")
+                })?,
+            );
+        }
+        Ok(req)
+    }
+}
+
 pub type AuthClient = KaidaDbClient<InterceptedService<Channel, AuthInterceptor>>;
 
 pub async fn connect(
@@ -20,21 +42,10 @@ pub async fn connect(
         .connect()
         .await?;
 
-    let interceptor: AuthInterceptor = if let Some(pass) = server_pass {
-        Box::new(move |mut req: tonic::Request<()>| {
-            req.metadata_mut().insert(
-                "x-server-pass",
-                pass.parse().map_err(|_| {
-                    tonic::Status::invalid_argument("invalid server password characters")
-                })?,
-            );
-            Ok(req)
-        })
-    } else {
-        Box::new(|req: tonic::Request<()>| Ok(req))
-    };
-
-    Ok(KaidaDbClient::with_interceptor(channel, interceptor))
+    Ok(KaidaDbClient::with_interceptor(
+        channel,
+        AuthInterceptor { pass: server_pass },
+    ))
 }
 
 pub fn guess_content_type(path: &str) -> &'static str {

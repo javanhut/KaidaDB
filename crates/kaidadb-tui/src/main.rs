@@ -155,8 +155,7 @@ async fn run(
                         KeyCode::Enter => {
                             if !app.store_key_input.is_empty() {
                                 if let Some(file_path) = app.selected_file_path.clone() {
-                                    app.execute_store_file(&file_path).await;
-                                    app.input_mode = InputMode::Normal;
+                                    app.execute_store_file(&file_path);
                                 }
                             }
                         }
@@ -286,14 +285,11 @@ async fn run(
                     },
                     InputMode::Uploading => match key.code {
                         KeyCode::Esc => {
-                            app.upload_pending_files.clear();
-                            app.uploading = false;
-                            app.status_message = format!(
-                                "Upload cancelled ({}/{} completed)",
-                                app.upload_current, app.upload_total
-                            );
-                            app.refresh_media_list().await;
-                            app.input_mode = InputMode::Normal;
+                            app.cancel_upload();
+                        }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.cancel_upload();
+                            break;
                         }
                         _ => {}
                     },
@@ -301,8 +297,10 @@ async fn run(
             }
         }
 
-        if app.input_mode == InputMode::Uploading && app.uploading {
-            app.upload_next_file().await;
+        app.drain_upload_events();
+        if app.needs_refresh_after_upload {
+            app.needs_refresh_after_upload = false;
+            app.refresh_media_list().await;
         }
     }
 
