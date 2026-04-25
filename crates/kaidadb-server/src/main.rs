@@ -1,10 +1,11 @@
 use std::future::IntoFuture;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use tokio::signal;
 use tonic::transport::Server as TonicServer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use kaidadb_api::grpc::KaidaDbGrpc;
 use kaidadb_api::proto::kaida_db_server::KaidaDbServer;
@@ -12,6 +13,21 @@ use kaidadb_api::rest;
 use kaidadb_cache::ChunkCache;
 use kaidadb_common::{server_key, KaidaDbConfig};
 use kaidadb_storage::StorageEngine;
+
+/// Mirror `kaidadb-ctl`'s log location so users get one canonical log path.
+fn log_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("kaidadb");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".local/state/kaidadb");
+        }
+    }
+    PathBuf::from("/tmp/kaidadb")
+}
 
 #[derive(Parser)]
 #[command(name = "kaidadb-server", version, about = "KaidaDB media database server")]
@@ -27,11 +43,39 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "kaidadb=info,tower_http=info".into()))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // stdout → systemd journal; file → persisted post-mortem log at
+    // $XDG_STATE_HOME/kaidadb/kaidadb.log, matching the path kaidadb-ctl uses.
+    let log_dir = log_dir();
+    let file_guard = match std::fs::create_dir_all(&log_dir) {
+        Ok(()) => {
+            let appender =
+                tracing_appender::rolling::daily(&log_dir, "kaidadb.log");
+            let (nb, guard) = tracing_appender::non_blocking(appender);
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_writer(nb)
+                .with_ansi(false);
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "kaidadb=info,tower_http=info".into()),
+                )
+                .with(tracing_subscriber::fmt::layer().boxed())
+                .with(file_layer.boxed())
+                .init();
+            Some(guard)
+        }
+        Err(e) => {
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "kaidadb=info,tower_http=info".into()),
+                )
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+            tracing::warn!(%e, path=%log_dir.display(), "could not create log dir; stdout only");
+            None
+        }
+    };
 
     let args = Args::parse();
     let config = KaidaDbConfig::load(args.config.as_deref())?;
@@ -110,5 +154,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Keep the non-blocking file appender guard alive for the whole run.
+    drop(file_guard);
     Ok(())
 }

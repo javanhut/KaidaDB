@@ -241,15 +241,36 @@ if $INSTALL_SERVICE; then
         systemctl --user daemon-reload
         systemctl --user enable kaidadb
         ok "Installed systemd user service"
+
+        # Enable linger so the service survives logout/suspend. Without this,
+        # systemd --user tears down when the last session ends, stopping kaidadb
+        # at logout, screen-lock-into-sleep, user-switching, etc.
+        if command -v loginctl &>/dev/null; then
+            if loginctl show-user "$(whoami)" 2>/dev/null | grep -q '^Linger=yes'; then
+                ok "User lingering already enabled"
+            else
+                info "Enabling user lingering (requires sudo) so kaidadb survives logout..."
+                if sudo -n loginctl enable-linger "$(whoami)" 2>/dev/null \
+                    || sudo loginctl enable-linger "$(whoami)"; then
+                    ok "User lingering enabled"
+                else
+                    warn "Could not enable lingering automatically"
+                    echo ""
+                    echo "  Run manually (sudo required):"
+                    echo "    sudo loginctl enable-linger $(whoami)"
+                    echo ""
+                    echo "  Without this, the service stops when you log out."
+                    echo ""
+                fi
+            fi
+        fi
+
         echo ""
         echo "  Manage with:"
         echo "    systemctl --user start kaidadb"
         echo "    systemctl --user stop kaidadb"
         echo "    systemctl --user status kaidadb"
         echo "    journalctl --user -u kaidadb -f"
-        echo ""
-        echo "  To start on boot (even without login):"
-        echo "    loginctl enable-linger $(whoami)"
         echo ""
 
     elif command -v rc-service &>/dev/null; then

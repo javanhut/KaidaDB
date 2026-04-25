@@ -5,8 +5,9 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=@@INSTALL_DIR@@/kaidadb-server --config @@CONFIG_DIR@@/config.toml
-Restart=on-failure
+Restart=always
 RestartSec=5
+LimitNOFILE=65536
 Environment=RUST_LOG=kaidadb=info
 WorkingDirectory=@@DATA_DIR@@
 

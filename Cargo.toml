@@ -36,7 +36,7 @@ prost-types = "0.13"
 # HTTP/REST
 axum = { version = "0.7", features = ["macros"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout"] }
 
 # Storage
 memmap2 = "0.9"
@@ -64,6 +64,7 @@ anyhow = "1"
 # Logging / tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -10,7 +11,7 @@ use axum::{
     Router,
 };
 use percent_encoding::percent_decode_str;
-use tower_http::cors::CorsLayer;
+use tower_http::{cors::CorsLayer, timeout::TimeoutLayer};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -43,6 +44,13 @@ pub fn router(state: AppState) -> Router {
         ))
         .with_state(state)
         .layer(CorsLayer::permissive())
+        // Upper bound on handler wall-clock so a stuck read/lock can't tie up
+        // a connection forever. Streaming bodies are not gated by this —
+        // TimeoutLayer only covers the handler Future, not body polling.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            Duration::from_secs(60),
+        ))
 }
 
 async fn auth_middleware(
@@ -186,6 +194,13 @@ async fn get_media(
 
     tokio::spawn(async move {
         for idx in start_idx..=end_idx.min(chunks.len().saturating_sub(1)) {
+            // Bail early if the client has already dropped the body stream —
+            // avoids doing expensive chunk reads / cache inserts after the
+            // receiver is gone.
+            if tx.is_closed() {
+                return;
+            }
+
             let chunk_id = &chunks[idx];
 
             let chunk_data = if let Some(cached) = cache.get(chunk_id) {
@@ -219,8 +234,16 @@ async fn get_media(
             let slice_end = slice_end.min(chunk_data.len());
 
             let slice = Bytes::copy_from_slice(&chunk_data[slice_start..slice_end]);
-            if tx.send(Ok(slice)).await.is_err() {
-                return;
+            // Race the send against the receiver-closed signal so a client
+            // that disconnects mid-stream wakes us immediately instead of
+            // waiting for the next backpressure cycle.
+            tokio::select! {
+                res = tx.send(Ok(slice)) => {
+                    if res.is_err() {
+                        return;
+                    }
+                }
+                _ = tx.closed() => return,
             }
         }
     });
