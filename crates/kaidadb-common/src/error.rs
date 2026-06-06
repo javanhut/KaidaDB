@@ -13,6 +13,9 @@ pub enum KaidaDbError {
     #[error("invalid key: {0}")]
     InvalidKey(String),
 
+    #[error("object too large: {0}")]
+    TooLarge(String),
+
     #[error("storage error: {0}")]
     Storage(String),
 

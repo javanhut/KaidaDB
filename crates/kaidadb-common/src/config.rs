@@ -28,10 +28,50 @@ pub struct KaidaDbConfig {
     pub streaming: StreamingConfig,
 }
 
+/// How aggressively the index write-ahead log is flushed to stable storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Durability {
+    /// Never fsync — fastest, but acked writes can vanish on power loss.
+    None,
+    /// fsync at each operation boundary (manifest commit / delete / rename),
+    /// which also flushes the preceding chunk-location entries. Durable and
+    /// cheap (one fsync per object, not per chunk).
+    Sync,
+}
+
+impl Default for Durability {
+    fn default() -> Self {
+        Durability::Sync
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     #[serde(default = "default_chunk_size")]
     pub chunk_size: usize,
+
+    /// Maximum size of a single stored object in bytes. `0` means unlimited.
+    /// Uploads exceeding this are rejected before exhausting memory/disk.
+    #[serde(default = "default_max_object_size")]
+    pub max_object_size: u64,
+
+    /// Write-ahead log durability mode.
+    #[serde(default)]
+    pub durability: Durability,
+
+    /// How often (seconds) to run orphan/fsck garbage collection. `0` disables.
+    #[serde(default = "default_gc_interval_secs")]
+    pub gc_interval_secs: u64,
+
+    /// Orphan chunks younger than this (seconds) are left alone during GC so an
+    /// in-flight upload isn't reclaimed out from under itself.
+    #[serde(default = "default_gc_grace_secs")]
+    pub gc_grace_secs: u64,
+
+    /// Recompute and verify the full-object checksum on every read.
+    #[serde(default)]
+    pub verify_checksum_on_read: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +106,11 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             chunk_size: default_chunk_size(),
+            max_object_size: default_max_object_size(),
+            durability: Durability::default(),
+            gc_interval_secs: default_gc_interval_secs(),
+            gc_grace_secs: default_gc_grace_secs(),
+            verify_checksum_on_read: false,
         }
     }
 }
@@ -166,6 +211,18 @@ fn default_rest_addr() -> String {
 
 fn default_chunk_size() -> usize {
     crate::types::DEFAULT_CHUNK_SIZE
+}
+
+fn default_max_object_size() -> u64 {
+    50 * 1024 * 1024 * 1024 // 50 GiB
+}
+
+fn default_gc_interval_secs() -> u64 {
+    3600 // hourly
+}
+
+fn default_gc_grace_secs() -> u64 {
+    3600 // 1 hour
 }
 
 fn default_cache_max_size() -> usize {

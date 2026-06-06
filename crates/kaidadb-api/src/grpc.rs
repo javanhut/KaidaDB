@@ -6,12 +6,24 @@ use tonic::{Request, Response, Status, Streaming};
 
 use kaidadb_cache::ChunkCache;
 use kaidadb_common::config::StreamingConfig;
-use kaidadb_common::server_key;
+use kaidadb_common::{server_key, KaidaDbError, MediaManifest};
 use kaidadb_storage::StorageEngine;
 
 use crate::proto::kaida_db_server::KaidaDb;
 use crate::proto::*;
 use crate::streaming;
+
+/// Map a storage error to an appropriate gRPC status.
+fn status_from(e: KaidaDbError) -> Status {
+    match e {
+        KaidaDbError::NotFound(_) => Status::not_found(e.to_string()),
+        KaidaDbError::AlreadyExists(_) => Status::already_exists(e.to_string()),
+        KaidaDbError::InvalidKey(_) => Status::invalid_argument(e.to_string()),
+        KaidaDbError::TooLarge(_) => Status::resource_exhausted(e.to_string()),
+        KaidaDbError::Unauthorized(_) => Status::unauthenticated(e.to_string()),
+        _ => Status::internal(e.to_string()),
+    }
+}
 
 pub struct KaidaDbGrpc {
     engine: Arc<StorageEngine>,
@@ -36,17 +48,17 @@ impl KaidaDbGrpc {
     }
 
     fn check_auth<T>(&self, req: &Request<T>) -> Result<(), Status> {
-        // Allow local connections without auth
-        if let Some(addr) = req.remote_addr() {
-            if addr.ip().is_loopback() {
-                return Ok(());
-            }
-        } else {
-            // No remote addr available (e.g., UDS) — treat as local
+        // Only a *confirmed* loopback peer skips auth. An unknown peer address is
+        // treated as remote (fail closed) rather than trusted.
+        let is_loopback = req
+            .remote_addr()
+            .map(|addr| addr.ip().is_loopback())
+            .unwrap_or(false);
+        if is_loopback {
             return Ok(());
         }
 
-        // Remote connection: require server password
+        // Remote (or unknown) connection: require server password
         match req.metadata().get("x-server-pass") {
             Some(value) => {
                 let provided = value.to_str().map_err(|_| {
@@ -73,38 +85,63 @@ impl KaidaDb for KaidaDbGrpc {
     ) -> Result<Response<StoreMediaResponse>, Status> {
         self.check_auth(&request)?;
         let mut stream = request.into_inner();
+        let engine = self.engine.clone();
 
-        let mut key = String::new();
-        let mut content_type = String::new();
-        let mut metadata = std::collections::HashMap::new();
-        let mut data = Vec::new();
-
-        while let Some(msg) = stream
+        // The first message must be the header so we can open the store session.
+        let first = stream
             .message()
             .await
-            .map_err(|e| Status::internal(e.to_string()))?
-        {
-            match msg.request {
-                Some(store_media_request::Request::Header(header)) => {
-                    key = header.key;
-                    content_type = header.content_type;
-                    metadata = header.metadata;
-                }
-                Some(store_media_request::Request::ChunkData(chunk)) => {
-                    data.extend_from_slice(&chunk);
-                }
-                None => {}
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let (key, content_type, metadata) = match first.and_then(|m| m.request) {
+            Some(store_media_request::Request::Header(h)) => {
+                (h.key, h.content_type, h.metadata)
             }
-        }
-
+            _ => return Err(Status::invalid_argument("first message must be a header")),
+        };
         if key.is_empty() {
             return Err(Status::invalid_argument("key is required"));
         }
 
-        let manifest = self
-            .engine
-            .store_with_metadata(&key, &data, &content_type, metadata)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        // Drive a blocking writer fed by a bounded channel: chunks flush to disk
+        // as they arrive, so the whole object is never buffered in memory and a
+        // slow client applies backpressure rather than growing an unbounded Vec.
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
+        let worker = tokio::task::spawn_blocking(move || -> Result<MediaManifest, KaidaDbError> {
+            let mut session = engine.begin_store(&key, &content_type, metadata)?;
+            while let Some(chunk) = rx.blocking_recv() {
+                if let Err(e) = session.write(&chunk) {
+                    session.abort();
+                    return Err(e);
+                }
+            }
+            session.finish()
+        });
+
+        loop {
+            match stream
+                .message()
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+            {
+                Some(msg) => match msg.request {
+                    Some(store_media_request::Request::ChunkData(chunk)) => {
+                        // Worker gone (e.g. size-limit hit) → stop pumping.
+                        if tx.send(chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Ignore stray/duplicate headers.
+                    Some(store_media_request::Request::Header(_)) | None => {}
+                },
+                None => break,
+            }
+        }
+        drop(tx); // signal end-of-stream to the writer
+
+        let manifest = worker
+            .await
+            .map_err(|e| Status::internal(format!("upload task failed: {e}")))?
+            .map_err(status_from)?;
 
         let chunk_count = manifest.chunk_count();
         Ok(Response::new(StoreMediaResponse {

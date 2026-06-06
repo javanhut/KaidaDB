@@ -77,6 +77,17 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Log panics through tracing (and the persisted file log) instead of only
+    // crashing to stderr. Request handlers are additionally wrapped in catch-panic
+    // layers so a single bad request can't take the whole server down.
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            tracing::error!("panic: {info}");
+            default_hook(info);
+        }));
+    }
+
     let args = Args::parse();
     let config = KaidaDbConfig::load(args.config.as_deref())?;
     config.validate()?;
@@ -103,7 +114,41 @@ async fn main() -> anyhow::Result<()> {
     let key_hash = Arc::new(key_hash);
 
     // Initialize storage engine
-    let engine = Arc::new(StorageEngine::open(&config.data_dir, config.storage.chunk_size)?);
+    let engine = Arc::new(
+        StorageEngine::open_with(
+            &config.data_dir,
+            config.storage.chunk_size,
+            config.storage.durability,
+        )?
+        .with_max_object_size(config.storage.max_object_size)
+        .with_verify_on_read(config.storage.verify_checksum_on_read),
+    );
+
+    // Background orphan/fsck garbage collection.
+    if config.storage.gc_interval_secs > 0 {
+        let gc_engine = engine.clone();
+        let interval = std::time::Duration::from_secs(config.storage.gc_interval_secs);
+        let grace = std::time::Duration::from_secs(config.storage.gc_grace_secs);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            // Skip the immediate first tick so startup isn't slowed by a scan.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let engine = gc_engine.clone();
+                let res = tokio::task::spawn_blocking(move || engine.gc(grace)).await;
+                match res {
+                    Ok(Ok(report)) => {
+                        if report.orphans_removed > 0 || report.dangling > 0 {
+                            tracing::info!(?report, "background gc pass");
+                        }
+                    }
+                    Ok(Err(e)) => tracing::warn!(%e, "background gc failed"),
+                    Err(e) => tracing::warn!(%e, "background gc task panicked"),
+                }
+            }
+        });
+    }
 
     // Initialize cache
     let cache = Arc::new(ChunkCache::new(config.cache.max_size));
@@ -117,9 +162,21 @@ async fn main() -> anyhow::Result<()> {
         key_hash.clone(),
     );
 
+    // Shared shutdown signal: a ctrl-c task flips a watch channel that both
+    // servers observe, then enforces a hard drain deadline.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        let _ = signal::ctrl_c().await;
+        tracing::info!("shutdown signal received; draining in-flight requests (max 30s)");
+        let _ = shutdown_tx.send(true);
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tracing::warn!("drain timeout exceeded; forcing exit");
+        std::process::exit(0);
+    });
+
     let grpc_server = TonicServer::builder()
         .add_service(KaidaDbServer::new(grpc_service))
-        .serve(grpc_addr);
+        .serve_with_shutdown(grpc_addr, wait_for_shutdown(shutdown_rx.clone()));
 
     // REST server
     let rest_state = rest::AppState {
@@ -132,29 +189,34 @@ async fn main() -> anyhow::Result<()> {
     let rest_addr: std::net::SocketAddr = config.rest_addr.parse()?;
     let rest_listener = tokio::net::TcpListener::bind(rest_addr).await?;
 
+    let rest_server = axum::serve(
+        rest_listener,
+        rest_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
+    .into_future();
+
     tracing::info!(%grpc_addr, %rest_addr, "server listening");
 
-    // Run both servers concurrently, shut down on ctrl-c
-    tokio::select! {
-        result = grpc_server => {
-            if let Err(e) = result {
-                tracing::error!(%e, "gRPC server error");
-            }
-        }
-        result = axum::serve(
-            rest_listener,
-            rest_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        ).into_future() => {
-            if let Err(e) = result {
-                tracing::error!(%e, "REST server error");
-            }
-        }
-        _ = signal::ctrl_c() => {
-            tracing::info!("shutting down");
-        }
+    // Run both servers; both stop draining when the shutdown signal fires.
+    let (grpc_result, rest_result) = tokio::join!(grpc_server, rest_server);
+    if let Err(e) = grpc_result {
+        tracing::error!(%e, "gRPC server error");
     }
+    if let Err(e) = rest_result {
+        tracing::error!(%e, "REST server error");
+    }
+    tracing::info!("shutdown complete");
 
     // Keep the non-blocking file appender guard alive for the whole run.
     drop(file_guard);
     Ok(())
+}
+
+/// Resolve once the shared shutdown signal flips to `true`.
+async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+    if *rx.borrow() {
+        return;
+    }
+    let _ = rx.changed().await;
 }

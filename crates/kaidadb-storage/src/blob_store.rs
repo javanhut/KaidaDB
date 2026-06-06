@@ -1,10 +1,17 @@
 use bytes::Bytes;
 use memmap2::Mmap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use kaidadb_common::{ChunkId, Result, KaidaDbError};
 
 use crate::chunk_format;
+
+/// Process-wide counter to give each in-flight temp file a unique name, so two
+/// threads writing the same (content-addressed) chunk can't clobber each other's
+/// temp file mid-write.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Manages chunk files on disk with two-level hex fan-out.
 pub struct BlobStore {
@@ -31,16 +38,29 @@ impl BlobStore {
             return Ok(path);
         }
 
-        if let Some(parent) = path.parent() {
+        let parent = path.parent();
+        if let Some(parent) = parent {
             fs::create_dir_all(parent)?;
         }
 
         let encoded = chunk_format::encode_chunk(data);
 
-        // Write atomically via temp file + rename
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, &encoded)?;
+        // Write durably: write to a unique temp file, fsync it, rename into place,
+        // then fsync the directory so the rename itself survives a crash.
+        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = path.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
+        {
+            let mut f = fs::File::create(&tmp_path)?;
+            f.write_all(&encoded)?;
+            f.sync_all()?;
+        }
         fs::rename(&tmp_path, &path)?;
+        if let Some(parent) = parent {
+            // Best-effort directory fsync (not all platforms/filesystems support it).
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
 
         tracing::debug!(?chunk_id, "wrote chunk to disk");
         Ok(path)
@@ -75,6 +95,38 @@ impl BlobStore {
     /// Check if a chunk exists on disk.
     pub fn chunk_exists(&self, chunk_id: &ChunkId) -> bool {
         self.chunk_path(chunk_id).exists()
+    }
+
+    /// Enumerate all chunk files on disk as `(hex_id, path)` pairs, walking the
+    /// two-level fan-out. Skips in-flight temp files. Used by the orphan GC.
+    pub fn iter_chunk_files(&self) -> Result<Vec<(String, PathBuf)>> {
+        let mut out = Vec::new();
+        if !self.chunks_dir.exists() {
+            return Ok(out);
+        }
+        for lvl1 in fs::read_dir(&self.chunks_dir)?.flatten() {
+            if !lvl1.path().is_dir() {
+                continue;
+            }
+            for lvl2 in fs::read_dir(lvl1.path())?.flatten() {
+                if !lvl2.path().is_dir() {
+                    continue;
+                }
+                for file in fs::read_dir(lvl2.path())?.flatten() {
+                    let path = file.path();
+                    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                        continue;
+                    };
+                    // Only finished chunk files; skip "<hex>.tmp.<pid>.<seq>".
+                    if let Some(hex) = name.strip_suffix(".kdc") {
+                        if hex.len() == 64 {
+                            out.push((hex.to_string(), path.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub fn data_dir(&self) -> &Path {

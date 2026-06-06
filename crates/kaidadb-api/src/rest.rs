@@ -11,17 +11,31 @@ use axum::{
     Router,
 };
 use percent_encoding::percent_decode_str;
-use tower_http::{cors::CorsLayer, timeout::TimeoutLayer};
+use tower_http::{catch_panic::CatchPanicLayer, cors::CorsLayer, timeout::TimeoutLayer};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use kaidadb_cache::ChunkCache;
 use kaidadb_common::config::StreamingConfig;
-use kaidadb_common::server_key;
+use kaidadb_common::{server_key, KaidaDbError};
 use kaidadb_storage::StorageEngine;
+use tokio_stream::StreamExt;
 
 use crate::streaming;
+
+/// Map a storage error to an HTTP response.
+fn rest_error(e: KaidaDbError) -> Response {
+    let code = match e {
+        KaidaDbError::NotFound(_) => StatusCode::NOT_FOUND,
+        KaidaDbError::AlreadyExists(_) => StatusCode::CONFLICT,
+        KaidaDbError::InvalidKey(_) => StatusCode::BAD_REQUEST,
+        KaidaDbError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+        KaidaDbError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (code, e.to_string()).into_response()
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -43,6 +57,9 @@ pub fn router(state: AppState) -> Router {
             auth_middleware,
         ))
         .with_state(state)
+        // Contain handler panics: turn them into 500s instead of dropping the
+        // connection (and, with the abort-on-panic runtime, the whole process).
+        .layer(CatchPanicLayer::new())
         .layer(CorsLayer::permissive())
         // Upper bound on handler wall-clock so a stuck read/lock can't tie up
         // a connection forever. Streaming bodies are not gated by this —
@@ -59,17 +76,14 @@ async fn auth_middleware(
     req: Request,
     next: Next,
 ) -> impl IntoResponse {
-    // Allow local connections without auth
-    if let Some(ConnectInfo(addr)) = connect_info {
-        if addr.ip().is_loopback() {
-            return next.run(req).await.into_response();
-        }
-    } else {
-        // No connect info available — treat as local
+    // Only a *confirmed* loopback peer skips auth. Missing connect info is treated
+    // as remote (fail closed) rather than trusted as local.
+    let is_loopback = matches!(connect_info, Some(ConnectInfo(addr)) if addr.ip().is_loopback());
+    if is_loopback {
         return next.run(req).await.into_response();
     }
 
-    // Remote connection: require server password
+    // Remote (or unknown) connection: require server password
     match req.headers().get("x-server-pass") {
         Some(value) => {
             if let Ok(provided) = value.to_str() {
@@ -99,8 +113,8 @@ async fn put_media(
     State(state): State<AppState>,
     Path(raw_key): Path<String>,
     headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
+    body: Body,
+) -> Response {
     let key = normalize_key(raw_key);
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -118,11 +132,47 @@ async fn put_media(
         }
     }
 
-    match state
-        .engine
-        .store_with_metadata(&key, &body, &content_type, metadata)
-    {
-        Ok(manifest) => {
+    // Stream the request body straight to disk via a blocking writer fed by a
+    // bounded channel — the whole object is never buffered in memory, and the
+    // size limit is enforced incrementally.
+    let engine = state.engine.clone();
+    let key_for_worker = key.clone();
+    let (tx, mut rx) = mpsc::channel::<Bytes>(8);
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut session = engine.begin_store(&key_for_worker, &content_type, metadata)?;
+        while let Some(chunk) = rx.blocking_recv() {
+            if let Err(e) = session.write(&chunk) {
+                session.abort();
+                return Err(e);
+            }
+        }
+        session.finish()
+    });
+
+    let mut stream = body.into_data_stream();
+    let mut body_error: Option<Response> = None;
+    while let Some(frame) = stream.next().await {
+        match frame {
+            Ok(bytes) => {
+                if tx.send(bytes).await.is_err() {
+                    break; // worker stopped early (e.g. size limit)
+                }
+            }
+            Err(e) => {
+                body_error =
+                    Some((StatusCode::BAD_REQUEST, format!("body read error: {e}")).into_response());
+                break;
+            }
+        }
+    }
+    drop(tx); // signal end-of-stream
+
+    let result = worker.await;
+    if let Some(resp) = body_error {
+        return resp;
+    }
+    match result {
+        Ok(Ok(manifest)) => {
             let resp = serde_json::json!({
                 "key": manifest.key,
                 "total_size": manifest.total_size,
@@ -131,7 +181,12 @@ async fn put_media(
             });
             (StatusCode::CREATED, axum::Json(resp)).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(Err(e)) => rest_error(e),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("upload task failed: {e}"),
+        )
+            .into_response(),
     }
 }
 
@@ -267,7 +322,10 @@ async fn get_media(
         response = response.header(header::CONTENT_LENGTH, total_size);
     }
 
-    response.body(body).unwrap().into_response()
+    match response.body(body) {
+        Ok(r) => r.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn head_media(
@@ -289,7 +347,10 @@ async fn head_media(
                 response = response.header(format!("X-KaidaDB-Meta-{k}"), v);
             }
 
-            response.body(Body::empty()).unwrap().into_response()
+            match response.body(Body::empty()) {
+                Ok(r) => r.into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -690,13 +751,9 @@ async fn combined_fallback(
 
     match method {
         Method::GET => get_media(State(state), Path(key), headers).await.into_response(),
-        Method::PUT => {
-            let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
-                Ok(b) => b,
-                Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-            };
-            put_media(State(state), Path(key), headers, body).await.into_response()
-        }
+        Method::PUT => put_media(State(state), Path(key), headers, req.into_body())
+            .await
+            .into_response(),
         Method::HEAD => head_media(State(state), Path(key)).await.into_response(),
         Method::DELETE => delete_media(State(state), Path(key)).await.into_response(),
         _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
