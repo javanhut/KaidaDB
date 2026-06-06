@@ -13,7 +13,17 @@ pub fn draw(f: &mut Frame, app: &App) {
         InputMode::Uploading => draw_upload_progress(f, app),
         InputMode::Detail => draw_detail_view(f, app),
         InputMode::PathBrowser | InputMode::NewDirInput => draw_path_browser_view(f, app),
-        InputMode::StoreKey | InputMode::FileBrowser => draw_store_view(f, app),
+        InputMode::StoreKey | InputMode::FileBrowser | InputMode::BrowserFilter => {
+            draw_store_view(f, app)
+        }
+        InputMode::UploadConfirm => {
+            draw_store_view(f, app);
+            draw_upload_confirm(f, app);
+        }
+        InputMode::ClearMarksConfirm => {
+            draw_store_view(f, app);
+            draw_clear_marks_confirm(f, app);
+        }
         InputMode::DeleteConfirm => {
             draw_main_layout(f, app);
             draw_delete_confirm(f, app);
@@ -643,17 +653,14 @@ fn draw_store_view(f: &mut Frame, app: &App) {
         .split(area);
 
     // Title bar
-    let marked_suffix = if app.input_mode == InputMode::FileBrowser
-        && !app.browser_marked.is_empty()
-    {
+    let marked_suffix = if !app.browser_marked.is_empty() {
         format!(" — {} marked", app.browser_marked.len())
     } else {
         String::new()
     };
     let subtitle_base = match app.input_mode {
-        InputMode::FileBrowser => "Select a file to store",
         InputMode::StoreKey => "Review the key and press Enter to store",
-        _ => "Select a file to store",
+        _ => "Pick what to upload  (Tab: change destination)",
     };
     let subtitle = format!("{}{}", subtitle_base, marked_suffix);
     let title = Paragraph::new(Line::from(vec![
@@ -692,9 +699,12 @@ fn draw_store_view(f: &mut Frame, app: &App) {
         InputMode::StoreKey => {
             " Enter: confirm store │ Tab: back to file browser │ Left/Right: move cursor │ Esc: cancel ".to_string()
         }
+        InputMode::BrowserFilter => {
+            " Type to filter │ Enter: keep filter │ Esc: clear │ ↑/↓: move ".to_string()
+        }
         InputMode::FileBrowser => {
             format!(
-                " Space: mark │ u: upload marked/dir │ c: clear marks │ Enter: open/store │ Left: parent │ Tab: back │ Esc: cancel{} ",
+                " Space: mark │ u: upload │ /: filter │ c: clear marks │ Enter: open/store │ ←: parent │ Tab: destination │ Esc: cancel{} ",
                 hidden_hint
             )
         }
@@ -772,15 +782,28 @@ fn draw_key_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_file_browser(f: &mut Frame, app: &App, area: Rect) {
-    let is_active = app.input_mode == InputMode::FileBrowser;
+    let is_active = matches!(
+        app.input_mode,
+        InputMode::FileBrowser | InputMode::BrowserFilter
+    );
     let border_color = if is_active {
         Color::Yellow
     } else {
         Color::DarkGray
     };
 
+    let title = if app.input_mode == InputMode::BrowserFilter || !app.browser_filter.is_empty() {
+        format!(
+            " {}  [filter: {}_ — {} match] ",
+            app.browser_dir.display(),
+            app.browser_filter,
+            app.browser_entries.len()
+        )
+    } else {
+        format!(" {} ", app.browser_dir.display())
+    };
     let block = Block::default()
-        .title(format!(" {} ", app.browser_dir.display()))
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
@@ -815,7 +838,7 @@ fn draw_file_browser(f: &mut Frame, app: &App, area: Rect) {
         .take(visible_rows)
         .map(|(i, entry)| {
             let is_selected = i == app.browser_selected;
-            let is_marked = !entry.is_dir && app.browser_is_marked(&entry.path);
+            let is_marked = app.browser_is_marked(&entry.path);
 
             let icon = if entry.is_dir { " " } else { " " };
             let icon_color = if entry.is_dir {
@@ -848,9 +871,7 @@ fn draw_file_browser(f: &mut Frame, app: &App, area: Rect) {
 
             let icon_style = if is_selected { hl } else { Style::default().fg(icon_color) };
 
-            let checkbox = if entry.is_dir {
-                "    "
-            } else if is_marked {
+            let checkbox = if is_marked {
                 "[x] "
             } else {
                 "[ ] "
@@ -876,6 +897,85 @@ fn draw_file_browser(f: &mut Frame, app: &App, area: Rect) {
 
     let list = List::new(items);
     f.render_widget(list, inner);
+}
+
+// ── Upload Confirm ───────────────────────────────────────────────────
+
+fn draw_upload_confirm(f: &mut Frame, app: &App) {
+    let dest = if app.path_prefix.is_empty() {
+        "/".to_string()
+    } else {
+        app.path_prefix.clone()
+    };
+    let area = centered_rect(64.min(f.area().width.saturating_sub(4)), 9, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Confirm Upload ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Upload "),
+            Span::styled(
+                format!("{} file(s)", app.pending_upload.len()),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(" ({})", format_size(app.pending_upload_bytes))),
+        ]),
+        Line::from(vec![
+            Span::styled("  from ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&app.pending_upload_label, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("  into ", Style::default().fg(Color::DarkGray)),
+            Span::styled(dest, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  y/Enter: upload │ any other key: cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_clear_marks_confirm(f: &mut Frame, app: &App) {
+    let area = centered_rect(48.min(f.area().width.saturating_sub(4)), 7, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Clear Marks ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Clear all "),
+            Span::styled(
+                format!("{}", app.browser_marked.len()),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" mark(s)?"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  y: clear │ any other key: keep",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 // ── Delete Confirm ───────────────────────────────────────────────────
@@ -1179,6 +1279,16 @@ fn format_bytes(bytes: u64) -> String {
     format!("{bytes} bytes")
 }
 
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 fn format_timestamp(ts: i64) -> String {
     if ts == 0 {
         return "\u{2014}".into(); // em dash
@@ -1265,13 +1375,8 @@ fn draw_upload_progress(f: &mut Frame, app: &App) {
     );
     f.render_widget(title, chunks[0]);
 
-    // Progress — bar shows current file's byte progress
-    let pct = if app.upload_current_bytes_total > 0 {
-        ((app.upload_current_bytes_sent.min(app.upload_current_bytes_total) * 100)
-            / app.upload_current_bytes_total) as usize
-    } else {
-        0
-    };
+    // Progress — bar shows whole-batch byte progress
+    let pct = app.upload_overall_pct();
 
     let bar_width = chunks[1].width.saturating_sub(6) as usize;
     let filled = (bar_width * pct) / 100;
@@ -1282,26 +1387,31 @@ fn draw_upload_progress(f: &mut Frame, app: &App) {
         pct
     );
 
-    let bytes_label = if app.upload_current_bytes_total > 0 {
-        format!(
-            "  {} / {}",
-            format_bytes(app.upload_current_bytes_sent),
-            format_bytes(app.upload_current_bytes_total)
-        )
+    // Speed + ETA line
+    let speed = app.upload_speed_bps();
+    let speed_label = if speed > 0.0 {
+        format!("{}/s", format_size(speed as u64))
     } else {
-        String::from("  preparing...")
+        "—".to_string()
+    };
+    let eta_label = match app.upload_eta_secs() {
+        Some(secs) => format_duration(secs),
+        None => "—".to_string(),
     };
 
     let progress = Paragraph::new(vec![
         Line::from(""),
         Line::from(vec![Span::styled(
             format!(
-                "  File {}/{}  ({} done, {} errors){}",
+                "  File {}/{}  ({} done, {} errors)   {} / {}   {}  ETA {}",
                 app.upload_current,
                 app.upload_total,
                 app.upload_successes,
                 app.upload_errors.len(),
-                &bytes_label
+                format_size(app.upload_overall_sent()),
+                format_size(app.upload_total_bytes),
+                speed_label,
+                eta_label,
             ),
             Style::default().fg(Color::White),
         )]),

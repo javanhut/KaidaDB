@@ -1,6 +1,7 @@
 use crate::client::{self, AuthClient, MediaMetadata};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 
 pub enum UploadEvent {
@@ -19,6 +20,9 @@ pub enum InputMode {
     NewDirInput,
     StoreKey,
     FileBrowser,
+    BrowserFilter,
+    UploadConfirm,
+    ClearMarksConfirm,
     DeleteConfirm,
     DeleteDirConfirm,
     Detail,
@@ -72,6 +76,8 @@ pub struct App {
     // Directory browsing in main view
     pub browse_prefix: String,
     pub browse_entries: Vec<BrowseEntry>,
+    // Remembered cursor position per browse prefix
+    pub browse_pos: HashMap<String, usize>,
 
     // UI state
     pub input_mode: InputMode,
@@ -99,10 +105,14 @@ pub struct App {
 
     // File browser
     pub browser_dir: PathBuf,
+    pub browser_all_entries: Vec<FileEntry>,
     pub browser_entries: Vec<FileEntry>,
     pub browser_selected: usize,
     pub browser_scroll_offset: usize,
     pub browser_marked: BTreeSet<PathBuf>,
+    pub browser_filter: String,
+    // Remembered cursor position per local directory
+    pub browser_pos: HashMap<PathBuf, usize>,
 
     // Rename/move
     pub rename_input: String,
@@ -114,6 +124,11 @@ pub struct App {
     pub mkdir_input: String,
     pub mkdir_cursor: usize,
 
+    // Pending upload awaiting confirmation
+    pub pending_upload: Vec<(PathBuf, String)>,
+    pub pending_upload_bytes: u64,
+    pub pending_upload_label: String,
+
     // Background upload worker
     pub upload_total: usize,
     pub upload_current: usize,
@@ -123,6 +138,9 @@ pub struct App {
     pub upload_current_key: String,
     pub upload_current_bytes_sent: u64,
     pub upload_current_bytes_total: u64,
+    pub upload_total_bytes: u64,
+    pub upload_done_bytes: u64,
+    pub upload_start: Option<Instant>,
     pub upload_rx: Option<mpsc::UnboundedReceiver<UploadEvent>>,
     pub upload_cancel: Option<watch::Sender<bool>>,
     pub needs_refresh_after_upload: bool,
@@ -143,6 +161,8 @@ impl App {
         let home = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/"));
+        // Start the file browser in the current working directory, falling back to $HOME.
+        let start_dir = std::env::current_dir().unwrap_or(home);
 
         Self {
             addr,
@@ -154,6 +174,7 @@ impl App {
             selected: 0,
             browse_prefix: String::new(),
             browse_entries: Vec::new(),
+            browse_pos: HashMap::new(),
             input_mode: InputMode::Normal,
             active_panel: Panel::List,
             status_message: "Connecting...".into(),
@@ -168,17 +189,23 @@ impl App {
             path_scroll_offset: 0,
             new_dir_input: String::new(),
             new_dir_cursor: 0,
-            browser_dir: home,
+            browser_dir: start_dir,
+            browser_all_entries: Vec::new(),
             browser_entries: Vec::new(),
             browser_selected: 0,
             browser_scroll_offset: 0,
             browser_marked: BTreeSet::new(),
+            browser_filter: String::new(),
+            browser_pos: HashMap::new(),
             rename_input: String::new(),
             rename_cursor: 0,
             rename_original_key: String::new(),
             rename_is_dir: false,
             mkdir_input: String::new(),
             mkdir_cursor: 0,
+            pending_upload: Vec::new(),
+            pending_upload_bytes: 0,
+            pending_upload_label: String::new(),
             upload_total: 0,
             upload_current: 0,
             upload_successes: 0,
@@ -187,6 +214,9 @@ impl App {
             upload_current_key: String::new(),
             upload_current_bytes_sent: 0,
             upload_current_bytes_total: 0,
+            upload_total_bytes: 0,
+            upload_done_bytes: 0,
+            upload_start: None,
             upload_rx: None,
             upload_cancel: None,
             needs_refresh_after_upload: false,
@@ -373,8 +403,14 @@ impl App {
     pub fn browse_into(&mut self) {
         if let Some(entry) = self.browse_entries.get(self.selected) {
             if entry.is_dir {
+                // Remember where we were so going back lands on this directory.
+                self.browse_pos.insert(self.browse_prefix.clone(), self.selected);
                 self.browse_prefix = format!("{}{}/", self.browse_prefix, entry.name);
-                self.selected = 0;
+                self.selected = self
+                    .browse_pos
+                    .get(&self.browse_prefix)
+                    .copied()
+                    .unwrap_or(0);
                 self.rebuild_browse_entries();
             }
         }
@@ -384,13 +420,19 @@ impl App {
         if self.browse_prefix.is_empty() {
             return;
         }
+        self.browse_pos.insert(self.browse_prefix.clone(), self.selected);
         let trimmed = self.browse_prefix.trim_end_matches('/');
         if let Some(pos) = trimmed.rfind('/') {
             self.browse_prefix = trimmed[..=pos].to_string();
         } else {
             self.browse_prefix.clear();
         }
-        self.selected = 0;
+        // Restore the cursor to the directory we just came out of.
+        self.selected = self
+            .browse_pos
+            .get(&self.browse_prefix)
+            .copied()
+            .unwrap_or(0);
         self.rebuild_browse_entries();
     }
 
@@ -413,6 +455,26 @@ impl App {
             InputMode::Normal => {
                 self.browse_up();
             }
+            _ => {}
+        }
+    }
+
+    /// Move the cursor down in whichever list is active (mouse wheel / scroll).
+    pub fn scroll_down(&mut self) {
+        match self.input_mode {
+            InputMode::Normal => self.next(),
+            InputMode::PathBrowser => self.path_next(),
+            InputMode::FileBrowser | InputMode::BrowserFilter => self.browser_next(),
+            _ => {}
+        }
+    }
+
+    /// Move the cursor up in whichever list is active (mouse wheel / scroll).
+    pub fn scroll_up(&mut self) {
+        match self.input_mode {
+            InputMode::Normal => self.previous(),
+            InputMode::PathBrowser => self.path_previous(),
+            InputMode::FileBrowser | InputMode::BrowserFilter => self.browser_previous(),
             _ => {}
         }
     }
@@ -443,11 +505,14 @@ impl App {
     // --- Path Browser (virtual KaidaDB directory tree) ---
 
     pub fn enter_store_mode(&mut self) {
+        // Pick *what* to upload first; the destination (path_prefix) defaults to
+        // wherever we're browsing and can be changed via Tab (path browser).
         self.store_key_input.clear();
         self.store_key_cursor = 0;
         self.path_prefix = self.browse_prefix.clone();
-        self.input_mode = InputMode::PathBrowser;
-        self.load_path_entries();
+        self.browser_filter.clear();
+        self.input_mode = InputMode::FileBrowser;
+        self.load_browser_dir();
     }
 
     pub fn load_path_entries(&mut self) {
@@ -719,9 +784,52 @@ impl App {
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
 
-        self.browser_entries = entries;
-        self.browser_selected = 0;
+        self.browser_all_entries = entries;
+        self.apply_browser_filter();
+        // Restore remembered cursor position for this directory.
+        let remembered = self
+            .browser_pos
+            .get(&self.browser_dir)
+            .copied()
+            .unwrap_or(0);
+        self.browser_selected = remembered.min(self.browser_entries.len().saturating_sub(1));
         self.browser_scroll_offset = 0;
+    }
+
+    /// Rebuild `browser_entries` from `browser_all_entries`, applying the typeahead filter.
+    pub fn apply_browser_filter(&mut self) {
+        if self.browser_filter.is_empty() {
+            self.browser_entries = self.browser_all_entries.clone();
+        } else {
+            let q = self.browser_filter.to_lowercase();
+            self.browser_entries = self
+                .browser_all_entries
+                .iter()
+                .filter(|e| e.name.to_lowercase().contains(&q))
+                .cloned()
+                .collect();
+        }
+        if self.browser_selected >= self.browser_entries.len() {
+            self.browser_selected = self.browser_entries.len().saturating_sub(1);
+        }
+    }
+
+    pub fn browser_filter_push(&mut self, c: char) {
+        self.browser_filter.push(c);
+        self.browser_selected = 0;
+        self.apply_browser_filter();
+    }
+
+    pub fn browser_filter_backspace(&mut self) {
+        self.browser_filter.pop();
+        self.browser_selected = 0;
+        self.apply_browser_filter();
+    }
+
+    pub fn browser_filter_clear(&mut self) {
+        self.browser_filter.clear();
+        self.browser_selected = 0;
+        self.apply_browser_filter();
     }
 
     pub fn browser_next(&mut self) {
@@ -759,7 +867,11 @@ impl App {
     pub fn browser_enter(&mut self) {
         if let Some(entry) = self.browser_entries.get(self.browser_selected) {
             if entry.is_dir {
-                self.browser_dir = entry.path.clone();
+                let target = entry.path.clone();
+                self.browser_pos
+                    .insert(self.browser_dir.clone(), self.browser_selected);
+                self.browser_filter.clear();
+                self.browser_dir = target;
                 self.load_browser_dir();
             }
             // File selection is handled by the caller (main.rs) via browser_select_file
@@ -768,6 +880,9 @@ impl App {
 
     pub fn browser_go_up(&mut self) {
         if let Some(parent) = self.browser_dir.parent() {
+            self.browser_pos
+                .insert(self.browser_dir.clone(), self.browser_selected);
+            self.browser_filter.clear();
             self.browser_dir = parent.to_path_buf();
             self.load_browser_dir();
         }
@@ -791,9 +906,7 @@ impl App {
         let Some(entry) = self.browser_entries.get(self.browser_selected) else {
             return;
         };
-        if entry.is_dir {
-            return;
-        }
+        // Both files and directories can be marked; directories upload recursively.
         let path = entry.path.clone();
         if !self.browser_marked.remove(&path) {
             self.browser_marked.insert(path);
@@ -830,67 +943,96 @@ impl App {
         self.begin_upload(pending);
     }
 
-    pub fn start_directory_upload(&mut self, dir_path: &Path) {
-        let files = collect_files_recursive(dir_path);
-        if files.is_empty() {
-            self.status_message = "Directory is empty or unreadable".into();
-            return;
-        }
-
+    /// Map a directory's files to (path, key) pairs preserving the tree below `base`.
+    /// `base` is the prefix stripped from each file path; the remainder is appended
+    /// to `path_prefix`. Passing the directory's parent as `base` keeps the directory
+    /// name in the key.
+    fn map_dir_files(&self, dir_path: &Path, base: &Path) -> Vec<(PathBuf, String)> {
         let mut pending = Vec::new();
-        for file_path in files {
-            let relative = file_path.strip_prefix(dir_path).unwrap_or(file_path.as_path());
+        for file_path in collect_files_recursive(dir_path) {
+            let relative = file_path.strip_prefix(base).unwrap_or(file_path.as_path());
             let rel_str = relative.to_string_lossy().replace('\\', "/");
             let key = format!("{}{}", self.path_prefix, rel_str);
             pending.push((file_path, key));
         }
-
-        let total = pending.len();
-        self.begin_upload(pending);
-        self.status_message = format!("Starting upload of {} files...", total);
+        pending
     }
 
-    pub fn start_marked_upload(&mut self) {
+    /// Build the confirmation preview for uploading an entire directory.
+    pub fn prepare_directory_upload(&mut self, dir_path: &Path) {
+        let pending = self.map_dir_files(dir_path, dir_path);
+        if pending.is_empty() {
+            self.status_message = "Directory is empty or unreadable".into();
+            return;
+        }
+        let label = format!("directory {}", dir_path.display());
+        self.stage_pending_upload(pending, label);
+    }
+
+    /// Build the confirmation preview for uploading marked files and directories.
+    /// Directories preserve their structure (their own name is kept in the key).
+    pub fn prepare_marked_upload(&mut self) {
         if self.browser_marked.is_empty() {
             self.status_message = "No files marked".into();
             return;
         }
 
         let marked: Vec<PathBuf> = self.browser_marked.iter().cloned().collect();
-
-        let mut filename_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let mut pending: Vec<(PathBuf, String)> = Vec::with_capacity(marked.len());
+        let mut pending: Vec<(PathBuf, String)> = Vec::new();
         for path in marked {
-            let filename = path
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if filename.is_empty() {
-                continue;
+            if path.is_dir() {
+                let base = path.parent().unwrap_or(path.as_path());
+                pending.extend(self.map_dir_files(&path, base));
+            } else {
+                let filename = path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if filename.is_empty() {
+                    continue;
+                }
+                let key = format!("{}{}", self.path_prefix, filename);
+                pending.push((path, key));
             }
-            *filename_counts.entry(filename.clone()).or_insert(0) += 1;
-            let key = format!("{}{}", self.path_prefix, filename);
-            pending.push((path, key));
         }
 
-        let dup_count: usize = filename_counts
-            .values()
-            .filter(|&&n| n > 1)
-            .map(|&n| n - 1)
-            .sum();
+        if pending.is_empty() {
+            self.status_message = "Nothing to upload".into();
+            return;
+        }
+        let label = format!("{} marked item(s)", self.browser_marked.len());
+        self.stage_pending_upload(pending, label);
+    }
 
+    /// Stash a prepared upload and switch to the confirmation view.
+    fn stage_pending_upload(&mut self, pending: Vec<(PathBuf, String)>, label: String) {
+        let total_bytes: u64 = pending
+            .iter()
+            .map(|(p, _)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .sum();
+        self.pending_upload = pending;
+        self.pending_upload_bytes = total_bytes;
+        self.pending_upload_label = label;
+        self.input_mode = InputMode::UploadConfirm;
+    }
+
+    pub fn confirm_pending_upload(&mut self) {
+        let pending = std::mem::take(&mut self.pending_upload);
         self.browser_marked.clear();
+        if pending.is_empty() {
+            self.input_mode = InputMode::Normal;
+            return;
+        }
         let total = pending.len();
         self.begin_upload(pending);
-        self.status_message = if dup_count > 0 {
-            format!(
-                "Starting upload of {} files (warning: {} duplicate filenames — later uploads will overwrite earlier ones)",
-                total, dup_count
-            )
-        } else {
-            format!("Starting upload of {} files...", total)
-        };
+        self.status_message = format!("Starting upload of {} files...", total);
+    }
+
+    pub fn cancel_pending_upload(&mut self) {
+        self.pending_upload.clear();
+        self.pending_upload_bytes = 0;
+        self.pending_upload_label.clear();
+        self.input_mode = InputMode::FileBrowser;
     }
 
     fn begin_upload(&mut self, pending: Vec<(PathBuf, String)>) {
@@ -898,6 +1040,12 @@ impl App {
         self.upload_current = 0;
         self.upload_successes = 0;
         self.upload_errors = Vec::new();
+        self.upload_total_bytes = pending
+            .iter()
+            .map(|(p, _)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .sum();
+        self.upload_done_bytes = 0;
+        self.upload_start = Some(Instant::now());
 
         let client = match self.client.clone() {
             Some(c) => c,
@@ -940,9 +1088,11 @@ impl App {
                     Ok(UploadEvent::FileCompleted) => {
                         self.upload_successes += 1;
                         self.upload_current_bytes_sent = self.upload_current_bytes_total;
+                        self.upload_done_bytes += self.upload_current_bytes_total;
                     }
                     Ok(UploadEvent::FileFailed { key, error }) => {
                         self.upload_errors.push(format!("{}: {}", key, error));
+                        self.upload_done_bytes += self.upload_current_bytes_total;
                     }
                     Ok(UploadEvent::Finished) => {
                         finished = true;
@@ -985,6 +1135,45 @@ impl App {
         if let Some(tx) = self.upload_cancel.as_ref() {
             let _ = tx.send(true);
         }
+    }
+
+    /// Total bytes sent across the whole batch so far.
+    pub fn upload_overall_sent(&self) -> u64 {
+        self.upload_done_bytes + self.upload_current_bytes_sent
+    }
+
+    /// Whole-batch completion percentage (0-100).
+    pub fn upload_overall_pct(&self) -> usize {
+        if self.upload_total_bytes == 0 {
+            return 0;
+        }
+        ((self.upload_overall_sent().min(self.upload_total_bytes) * 100) / self.upload_total_bytes)
+            as usize
+    }
+
+    /// Average upload speed in bytes/sec since the batch started.
+    pub fn upload_speed_bps(&self) -> f64 {
+        match self.upload_start {
+            Some(start) => {
+                let elapsed = start.elapsed().as_secs_f64();
+                if elapsed > 0.0 {
+                    self.upload_overall_sent() as f64 / elapsed
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        }
+    }
+
+    /// Estimated seconds remaining, or None if not enough data yet.
+    pub fn upload_eta_secs(&self) -> Option<u64> {
+        let speed = self.upload_speed_bps();
+        if speed <= 0.0 || self.upload_total_bytes == 0 {
+            return None;
+        }
+        let remaining = self.upload_total_bytes.saturating_sub(self.upload_overall_sent());
+        Some((remaining as f64 / speed) as u64)
     }
 
     pub fn enter_delete_confirm(&mut self) {

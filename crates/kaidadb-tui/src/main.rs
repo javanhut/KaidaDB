@@ -5,7 +5,10 @@ mod ui;
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+        MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -71,7 +74,13 @@ async fn run(
         terminal.draw(|f| ui::draw(f, &app))?;
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+            match event::read()? {
+                Event::Mouse(m) => match m.kind {
+                    MouseEventKind::ScrollDown => app.scroll_down(),
+                    MouseEventKind::ScrollUp => app.scroll_up(),
+                    _ => {}
+                },
+                Event::Key(key) => {
                 match app.input_mode {
                     InputMode::Normal => match key.code {
                         KeyCode::Char('q') => {
@@ -208,19 +217,63 @@ async fn run(
                             }
                         }
                         KeyCode::Char(' ') => app.browser_toggle_mark(),
-                        KeyCode::Char('c') => app.browser_clear_marks(),
+                        KeyCode::Char('c') => {
+                            if !app.browser_marked.is_empty() {
+                                app.input_mode = InputMode::ClearMarksConfirm;
+                            }
+                        }
+                        KeyCode::Char('/') => {
+                            app.input_mode = InputMode::BrowserFilter;
+                        }
                         KeyCode::Char('u') => {
                             if !app.browser_marked.is_empty() {
-                                app.start_marked_upload();
+                                app.prepare_marked_upload();
                             } else if let Some(entry) = app.browser_selected_entry() {
                                 if entry.is_dir {
                                     let dir_path = entry.path.clone();
-                                    app.start_directory_upload(&dir_path);
+                                    app.prepare_directory_upload(&dir_path);
                                 }
                             }
                         }
                         KeyCode::Char('.') => app.toggle_hidden_files(),
                         _ => {}
+                    },
+                    InputMode::BrowserFilter => match key.code {
+                        KeyCode::Enter => {
+                            app.input_mode = InputMode::FileBrowser;
+                        }
+                        KeyCode::Esc => {
+                            app.browser_filter_clear();
+                            app.input_mode = InputMode::FileBrowser;
+                        }
+                        KeyCode::Backspace => app.browser_filter_backspace(),
+                        KeyCode::Down => {
+                            app.input_mode = InputMode::FileBrowser;
+                            app.browser_next();
+                        }
+                        KeyCode::Up => {
+                            app.input_mode = InputMode::FileBrowser;
+                            app.browser_previous();
+                        }
+                        KeyCode::Char(c) => app.browser_filter_push(c),
+                        _ => {}
+                    },
+                    InputMode::UploadConfirm => match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                            app.confirm_pending_upload();
+                        }
+                        _ => {
+                            app.cancel_pending_upload();
+                        }
+                    },
+                    InputMode::ClearMarksConfirm => match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            app.browser_clear_marks();
+                            app.input_mode = InputMode::FileBrowser;
+                        }
+                        _ => {
+                            app.input_mode = InputMode::FileBrowser;
+                        }
                     },
                     InputMode::RenameInput => match key.code {
                         KeyCode::Enter => {
@@ -294,6 +347,8 @@ async fn run(
                         _ => {}
                     },
                 }
+                }
+                _ => {}
             }
         }
 
