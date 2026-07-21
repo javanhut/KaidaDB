@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::{App, InputMode, Panel};
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     match app.input_mode {
         InputMode::Uploading => draw_upload_progress(f, app),
         InputMode::Detail => draw_detail_view(f, app),
@@ -50,7 +50,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 // ── Main Layout ──────────────────────────────────────────────────────
 
-fn draw_main_layout(f: &mut Frame, app: &App) {
+fn draw_main_layout(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -114,7 +114,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(title).block(block), area);
 }
 
-fn draw_body(f: &mut Frame, app: &App, area: Rect) {
+fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -124,7 +124,7 @@ fn draw_body(f: &mut Frame, app: &App, area: Rect) {
     draw_preview_panel(f, app, chunks[1]);
 }
 
-fn draw_media_list(f: &mut Frame, app: &App, area: Rect) {
+fn draw_media_list(f: &mut Frame, app: &mut App, area: Rect) {
     let hl = Style::default()
         .fg(Color::Black)
         .bg(Color::Cyan)
@@ -136,10 +136,36 @@ fn draw_media_list(f: &mut Frame, app: &App, area: Rect) {
         format!(" /{} ", app.browse_prefix)
     };
 
+    let border = if app.active_panel == Panel::List {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border));
+
+    // Keep the selection inside a sliding window of visible rows.
+    let visible_rows = block.inner(area).height as usize;
+    let scroll_offset = if visible_rows == 0 {
+        0
+    } else if app.selected < app.list_scroll_offset {
+        app.selected
+    } else if app.selected >= app.list_scroll_offset + visible_rows {
+        app.selected - visible_rows + 1
+    } else {
+        app.list_scroll_offset
+    };
+    app.list_scroll_offset = scroll_offset;
+
     let items: Vec<ListItem> = app
         .browse_entries
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_rows)
         .map(|(i, entry)| {
             let is_selected = i == app.selected;
 
@@ -194,18 +220,7 @@ fn draw_media_list(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let border = if app.active_panel == Panel::List {
-        Color::Cyan
-    } else {
-        Color::DarkGray
-    };
-
-    let list = List::new(items).block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border)),
-    );
+    let list = List::new(items).block(block);
     f.render_widget(list, area);
 }
 
@@ -390,17 +405,23 @@ fn draw_detail_view(f: &mut Frame, app: &App) {
         }
     }
 
+    // Clamp the scroll offset so long metadata can't be scrolled past the end.
+    let inner_height = chunks[1].height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(inner_height);
+    let scroll = app.detail_scroll.min(max_scroll) as u16;
+
     let content = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(content, chunks[1]);
 
     let status = Paragraph::new(Span::styled(
-        " Esc Back │ d Delete ",
+        " ↑/↓ Scroll │ Esc Back │ d Delete ",
         Style::default().fg(Color::DarkGray),
     ))
     .block(
@@ -413,7 +434,7 @@ fn draw_detail_view(f: &mut Frame, app: &App) {
 
 // ── Path Browser View (navigate KaidaDB virtual directory tree) ──────
 
-fn draw_path_browser_view(f: &mut Frame, app: &App) {
+fn draw_path_browser_view(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     let chunks = Layout::default()
@@ -504,6 +525,7 @@ fn draw_path_browser_view(f: &mut Frame, app: &App) {
         } else {
             app.path_scroll_offset
         };
+        app.path_scroll_offset = scroll_offset;
 
         let hl = Style::default()
             .fg(Color::Black)
@@ -576,18 +598,9 @@ fn draw_path_browser_view(f: &mut Frame, app: &App) {
 
         let dir_text = &app.new_dir_input;
         let cursor_pos = app.new_dir_cursor;
-        let (before, after) = dir_text.split_at(cursor_pos.min(dir_text.len()));
-        let (cursor_char, rest) = if after.is_empty() {
-            (" ", "")
-        } else {
-            after.split_at(
-                after
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(after.len()),
-            )
-        };
+        // Borders (2) + "  Name: " label (8 cols).
+        let avail = (dialog_area.width as usize).saturating_sub(10);
+        let (before, cursor_char, rest) = input_cursor_spans(dir_text, cursor_pos, avail);
 
         let lines = vec![
             Line::from(""),
@@ -639,7 +652,7 @@ fn draw_path_browser_view(f: &mut Frame, app: &App) {
 
 // ── Store View (full screen with file browser) ───────────────────────
 
-fn draw_store_view(f: &mut Frame, app: &App) {
+fn draw_store_view(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     let chunks = Layout::default()
@@ -739,16 +752,13 @@ fn draw_key_input(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
-    // Build the key text with a visible cursor
+    // Build the key text with a visible cursor, windowed so long keys keep
+    // the cursor in view.
     let key_text = &app.store_key_input;
     let cursor_pos = app.store_key_cursor;
-
-    let (before, after) = key_text.split_at(cursor_pos.min(key_text.len()));
-    let (cursor_char, rest) = if after.is_empty() {
-        (" ", "")
-    } else {
-        after.split_at(after.char_indices().nth(1).map(|(i, _)| i).unwrap_or(after.len()))
-    };
+    // Borders (2) + "  Key: " label (7 cols).
+    let avail = (area.width as usize).saturating_sub(9);
+    let (before, cursor_char, rest) = input_cursor_spans(key_text, cursor_pos, avail);
 
     let text_style = Style::default().fg(Color::White);
     let cursor_style = if is_active {
@@ -781,7 +791,7 @@ fn draw_key_input(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn draw_file_browser(f: &mut Frame, app: &App, area: Rect) {
+fn draw_file_browser(f: &mut Frame, app: &mut App, area: Rect) {
     let is_active = matches!(
         app.input_mode,
         InputMode::FileBrowser | InputMode::BrowserFilter
@@ -824,6 +834,7 @@ fn draw_file_browser(f: &mut Frame, app: &App, area: Rect) {
     } else {
         app.browser_scroll_offset
     };
+    app.browser_scroll_offset = scroll_offset;
 
     let hl = Style::default()
         .fg(Color::Black)
@@ -1084,18 +1095,9 @@ fn draw_rename_dialog(f: &mut Frame, app: &App) {
 
     let text = &app.rename_input;
     let cursor_pos = app.rename_cursor;
-    let (before, after) = text.split_at(cursor_pos.min(text.len()));
-    let (cursor_char, rest) = if after.is_empty() {
-        (" ", "")
-    } else {
-        after.split_at(
-            after
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| i)
-                .unwrap_or(after.len()),
-        )
-    };
+    // Borders (2) + label ("  New key:  " / "  New path: ", 12 cols).
+    let avail = (area.width as usize).saturating_sub(14);
+    let (before, cursor_char, rest) = input_cursor_spans(text, cursor_pos, avail);
 
     let label = if app.rename_is_dir { "  New path: " } else { "  New key:  " };
 
@@ -1160,18 +1162,9 @@ fn draw_mkdir_dialog(f: &mut Frame, app: &App) {
 
     let text = &app.mkdir_input;
     let cursor_pos = app.mkdir_cursor;
-    let (before, after) = text.split_at(cursor_pos.min(text.len()));
-    let (cursor_char, rest) = if after.is_empty() {
-        (" ", "")
-    } else {
-        after.split_at(
-            after
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| i)
-                .unwrap_or(after.len()),
-        )
-    };
+    // Borders (2) + "  Name: " label (8 cols).
+    let avail = (area.width as usize).saturating_sub(10);
+    let (before, cursor_char, rest) = input_cursor_spans(text, cursor_pos, avail);
 
     let parent = if app.browse_prefix.is_empty() {
         "/".to_string()
@@ -1215,9 +1208,15 @@ fn draw_search_bar(f: &mut Frame, app: &App) {
     let area = centered_rect(60, 3, f.area());
     f.render_widget(Clear, area);
 
+    // The search cursor is always at the end; window the text so the tail
+    // (and cursor) stay visible for long queries. Borders (2) + " / " (3)
+    // + cursor block (1).
+    let avail = (area.width as usize).saturating_sub(6);
+    let (visible, _, _) = input_cursor_spans(&app.search_input, app.search_input.len(), avail);
+
     let input = Paragraph::new(Line::from(vec![
         Span::styled(" / ", Style::default().fg(Color::Magenta)),
-        Span::styled(&app.search_input, Style::default().fg(Color::White)),
+        Span::styled(visible, Style::default().fg(Color::White)),
         Span::styled("█", Style::default().fg(Color::Magenta)),
     ]))
     .block(
@@ -1236,6 +1235,49 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+/// Slice a single-line text input into (before, cursor, rest) spans limited to
+/// a horizontal window of `width` columns that keeps the cursor visible.
+/// `cursor` is a byte offset; all returned slices fall on char boundaries.
+fn input_cursor_spans(text: &str, cursor: usize, width: usize) -> (&str, &str, &str) {
+    let cursor = cursor.min(text.len());
+    let total = text.chars().count();
+    let start_char = if total <= width {
+        0
+    } else {
+        let cursor_char = text[..cursor].chars().count();
+        cursor_char.saturating_add(1).saturating_sub(width)
+    };
+    let start = text
+        .char_indices()
+        .nth(start_char)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let end = if total <= width {
+        text.len()
+    } else {
+        text.char_indices()
+            .nth(start_char + width)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len())
+    };
+
+    let visible = &text[start..end];
+    let cur = cursor.saturating_sub(start).min(visible.len());
+    let (before, after) = visible.split_at(cur);
+    let (cursor_char, rest) = if after.is_empty() {
+        (" ", "")
+    } else {
+        after.split_at(
+            after
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| i)
+                .unwrap_or(after.len()),
+        )
+    };
+    (before, cursor_char, rest)
 }
 
 fn labeled_line<'a>(label: &'a str, value: &'a str, color: Color, bold: bool) -> Line<'a> {
@@ -1458,4 +1500,120 @@ fn draw_upload_progress(f: &mut Frame, app: &App) {
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(status, chunks[3]);
+}
+
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::BrowseEntry;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    fn app_with_files(n: usize) -> App {
+        let mut app = App::new("http://localhost:50051".into(), None);
+        app.browse_entries = (0..n)
+            .map(|i| BrowseEntry {
+                name: format!("file-{i:02}"),
+                is_dir: false,
+                full_key: Some(format!("file-{i:02}")),
+                item_count: 0,
+                size: 0,
+            })
+            .collect();
+        app.status_message.clear();
+        app
+    }
+
+    #[test]
+    fn media_list_scrolls_to_keep_selection_visible() {
+        let mut app = app_with_files(50);
+        // 80x24 terminal: body height is 24-3-3=18, inner list height 16,
+        // so selecting entry 40 should show the window file-25..=file-40.
+        app.selected = 40;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("file-40"), "selected entry must be visible");
+        assert!(text.contains("file-25"), "first window entry must be visible");
+        assert!(!text.contains("file-24"), "entries above the window must be clipped");
+        assert!(!text.contains("file-00"));
+    }
+
+    #[test]
+    fn media_list_shows_from_top_when_selection_fits() {
+        let mut app = app_with_files(50);
+        app.selected = 3;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("file-00"));
+        assert!(text.contains("file-03"));
+        assert!(!text.contains("file-16"), "entries past the window must be clipped");
+    }
+
+    #[test]
+    fn input_cursor_spans_keeps_cursor_visible() {
+        let text = "0123456789abcdef";
+        // Cursor near the start: window begins at 0.
+        let (before, cursor, rest) = input_cursor_spans(text, 5, 6);
+        assert_eq!(before, "01234");
+        assert_eq!(cursor, "5");
+        assert_eq!(rest, ""); // window covers chars 0..6
+
+        // Cursor near the end: window slides so the cursor is at the edge.
+        let (before, cursor, rest) = input_cursor_spans(text, 14, 6);
+        assert_eq!(before, "9abcd");
+        assert_eq!(cursor, "e");
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn input_cursor_spans_windows_tail_at_end_of_input() {
+        let text = "0123456789abcdef";
+        let (before, cursor, rest) = input_cursor_spans(text, text.len(), 6);
+        // Cursor at end: last 5 chars + cursor block.
+        assert_eq!(before, "bcdef");
+        assert_eq!(cursor, " ");
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn rename_dialog_scrolls_long_keys() {
+        let mut app = app_with_files(0);
+        app.input_mode = InputMode::RenameInput;
+        app.rename_original_key = "short".to_string();
+        app.rename_input = format!("prefix-{}", "x".repeat(80));
+        app.rename_cursor = app.rename_input.len();
+        app.rename_is_dir = false;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(
+            !text.contains("prefix-"),
+            "head of an over-long key must scroll out of view"
+        );
+        assert!(
+            text.contains("xxxx"),
+            "tail of the key near the cursor must be visible"
+        );
+    }
 }

@@ -72,6 +72,7 @@ pub struct App {
     pub items: Vec<MediaMetadata>,
     pub filtered_items: Vec<usize>,
     pub selected: usize,
+    pub list_scroll_offset: usize,
 
     // Directory browsing in main view
     pub browse_prefix: String,
@@ -147,6 +148,7 @@ pub struct App {
 
     // Detail view
     pub detail_item: Option<MediaMetadata>,
+    pub detail_scroll: usize,
 
     // Health
     pub health_status: String,
@@ -172,6 +174,7 @@ impl App {
             items: Vec::new(),
             filtered_items: Vec::new(),
             selected: 0,
+            list_scroll_offset: 0,
             browse_prefix: String::new(),
             browse_entries: Vec::new(),
             browse_pos: HashMap::new(),
@@ -221,6 +224,7 @@ impl App {
             upload_cancel: None,
             needs_refresh_after_upload: false,
             detail_item: None,
+            detail_scroll: 0,
             health_status: "unknown".into(),
             server_version: String::new(),
             show_hidden_files: false,
@@ -442,6 +446,7 @@ impl App {
                 self.browse_into();
             } else if let Some(item) = self.selected_item() {
                 self.detail_item = Some(item.clone());
+                self.detail_scroll = 0;
                 self.input_mode = InputMode::Detail;
             }
         }
@@ -465,6 +470,7 @@ impl App {
             InputMode::Normal => self.next(),
             InputMode::PathBrowser => self.path_next(),
             InputMode::FileBrowser | InputMode::BrowserFilter => self.browser_next(),
+            InputMode::Detail => self.detail_scroll_down(),
             _ => {}
         }
     }
@@ -475,8 +481,19 @@ impl App {
             InputMode::Normal => self.previous(),
             InputMode::PathBrowser => self.path_previous(),
             InputMode::FileBrowser | InputMode::BrowserFilter => self.browser_previous(),
+            InputMode::Detail => self.detail_scroll_up(),
             _ => {}
         }
+    }
+
+    /// Scroll the detail view content down one line.
+    pub fn detail_scroll_down(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_add(1);
+    }
+
+    /// Scroll the detail view content up one line.
+    pub fn detail_scroll_up(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_sub(1);
     }
 
     pub fn toggle_panel(&mut self) {

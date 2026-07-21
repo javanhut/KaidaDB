@@ -71,7 +71,7 @@ async fn run(
     app.check_health().await;
 
     loop {
-        terminal.draw(|f| ui::draw(f, &app))?;
+        terminal.draw(|f| ui::draw(f, &mut app))?;
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
@@ -332,6 +332,8 @@ async fn run(
                         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => {
                             app.input_mode = InputMode::Normal;
                         }
+                        KeyCode::Up | KeyCode::Char('k') => app.detail_scroll_up(),
+                        KeyCode::Down | KeyCode::Char('j') => app.detail_scroll_down(),
                         KeyCode::Char('d') => app.enter_delete_confirm(),
                         KeyCode::Char('m') => app.enter_rename_mode(),
                         _ => {}
