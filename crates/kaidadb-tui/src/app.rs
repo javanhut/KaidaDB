@@ -265,23 +265,36 @@ impl App {
 
     pub async fn refresh_media_list(&mut self) {
         if let Some(ref mut client) = self.client {
-            match client
-                .list_media(client::ListMediaRequest {
-                    prefix: String::new(),
-                    limit: 1000,
-                    cursor: String::new(),
-                })
-                .await
-            {
-                Ok(resp) => {
-                    self.items = resp.into_inner().items;
-                    self.apply_filter();
-                    self.status_message = format!("{} media items loaded", self.items.len());
-                }
-                Err(e) => {
-                    self.status_message = format!("Failed to list: {e}");
+            // The server returns at most `limit` items per call, so follow
+            // `next_cursor` until it's exhausted to get the whole keyspace.
+            let mut items = Vec::new();
+            let mut cursor = String::new();
+            loop {
+                match client
+                    .list_media(client::ListMediaRequest {
+                        prefix: String::new(),
+                        limit: 1000,
+                        cursor: cursor.clone(),
+                    })
+                    .await
+                {
+                    Ok(resp) => {
+                        let page = resp.into_inner();
+                        items.extend(page.items);
+                        if page.next_cursor.is_empty() || page.next_cursor == cursor {
+                            break;
+                        }
+                        cursor = page.next_cursor;
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Failed to list: {e}");
+                        return;
+                    }
                 }
             }
+            self.items = items;
+            self.apply_filter();
+            self.status_message = format!("{} media items loaded", self.items.len());
         }
     }
 
